@@ -1,0 +1,10 @@
+[package]
+name = "xz"
+version = "5.2.5"
+nanvix-version = "0.12.485"
+
+[builds]
+[builds.matrix]
+platforms = ["hyperlight", "microvm"]
+modes = ["multi-process", "single-process", "standalone"]
+memory = ["128mb", "256mb"]
