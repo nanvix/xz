@@ -120,13 +120,60 @@ Tests run in three tiers (mirrors the sibling ports):
 
 The upstream XZ Utils 5.2.5 tree is preserved byte-identical outside
 the Nanvix-specific surface (`.nanvix/`, `.github/workflows/nanvix-*`,
-root wrappers `z`/`z.sh`/`z.ps1`, `NANVIX.md`, and `.gitignore`).
-The initial port required zero source patches; cross-build deviations
-are expressed as configure-time `ac_cv_*` overrides in `.nanvix/z.py`.
+root wrappers `z`/`z.sh`/`z.ps1`, `NANVIX.md`, and `.gitignore`) **plus**
+the vendored autotools-generated outputs listed below, which xz upstream
+intentionally does not check into git but which the Nanvix port commits
+directly so that the toolchain Docker image does not need autoconf,
+autopoint, libtool, automake, or gettext at build time.
 
-`build-aux/config.sub` is mutated at build time by `./z setup` (sed
-injection of `i686-nanvix`); this file is autotools-generated and
-falls under the "generated artefacts" exemption.
+One single-line source patch is applied to `configure.ac`:
+
+| File | Change | Rationale |
+|------|--------|-----------|
+| `configure.ac` | Insert `AM_MAINTAINER_MODE([disable])` after `AM_INIT_AUTOMAKE` | Gates automake's autoconf/aclocal/automake rebuild rules in every `Makefile.in` behind `--enable-maintainer-mode` (off by default). Without this macro, `make` re-invokes `$(AUTOCONF)` whenever the vendored `m4/*.m4` or `aclocal.m4` are missing, which forces those files to be vendored too (~17 extra files / ~500 KB of pure-regen inputs). With the macro, the vendored set shrinks from 47 files / ~2.2 MB to 30 files / ~1.7 MB. |
+
+All other cross-build deviations are expressed as configure-time
+`ac_cv_*` overrides in `.nanvix/z.py` rather than as source patches.
+
+### Vendored autotools outputs
+
+The port commits the result of `sh ./autogen.sh --no-po4a` directly:
+`configure`, `config.h.in`, every `Makefile.in`, plus the `build-aux/`
+and `po/` payloads (30 files, ~1.7 MB). Upstream's root `.gitignore`
+lists these files; the port adds them with `git add -f` and treats them
+as a sanctioned exception to the byte-identity invariant. This mirrors
+the cpython port (which gets `configure` for free because cpython
+upstream itself commits it).
+
+`aclocal.m4`, `m4/*.m4`, and `ABOUT-NLS` are **not** vendored: they are
+only consumed by `aclocal`/`autoconf` during regeneration, and the
+`AM_MAINTAINER_MODE` patch above keeps `make` from ever invoking those
+tools at build time.
+
+`build-aux/config.sub` is part of the vendored set and is committed
+*already-patched* to recognise `i686-nanvix`: the `fiwix*` arm of the
+GNU OS-name table is extended to `| fiwix* | nanvix* )`. Any refresh
+of the vendored outputs (see below) regenerates `config.sub` from the
+upstream automake template, so the one-line `nanvix*` extension MUST
+be re-applied before staging.
+
+**Refreshing the vendored set** (only needed if `configure.ac`,
+`Makefile.am`, or upstream tooling changes, or when bumping the
+upstream version):
+
+```sh
+# On a host with autoconf, automake, libtool, autopoint, gettext:
+sh ./autogen.sh --no-po4a
+# Re-apply the i686-nanvix recognition (config.sub is regenerated):
+sed -i 's/| fiwix\* )/| fiwix* | nanvix* )/' build-aux/config.sub
+# Stage only the build-time inputs; skip aclocal.m4, m4/, ABOUT-NLS
+# (those are only consumed by autoreconf, gated off by AM_MAINTAINER_MODE):
+git ls-files --others --ignored --exclude-standard \
+    | grep -vE '^(autom4te\.cache/|aclocal\.m4$|m4/|ABOUT-NLS$)' \
+    | xargs git add -f
+rm -rf autom4te.cache
+git commit -m "Refresh vendored autotools outputs"
+```
 
 ---
 
