@@ -68,3 +68,11 @@ build-aux/test-driver
 /src/liblzma/api/Makefile
 /src/lzmainfo/Makefile
 /src/xzdec/Makefile
+
+# Nanvix port artefacts
+/.nanvix/venv/
+/.nanvix-configured
+/.nanvix-artifacts/
+/dist/
+/build/
+/nanvix-artifacts/
