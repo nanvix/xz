@@ -71,6 +71,10 @@ build-aux/test-driver
 
 # Nanvix port artefacts
 /.nanvix/venv/
+/.nanvix/__pycache__/
+/.nanvix/cache/
+/.nanvix/env.json
+/.nanvix/sysroot/
 /.nanvix-configured
 /.nanvix-artifacts/
 /dist/
