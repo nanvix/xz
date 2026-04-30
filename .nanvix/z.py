@@ -211,41 +211,15 @@ class XzBuild(ZScript):
         cs.write_text(new_text)
         log.info("Patched build-aux/config.sub for i686-nanvix")
 
-    def _apply_patches(self) -> None:
-        """Apply .nanvix/patches/*.patch in lexical order, idempotently.
-
-        Each patch is skipped if `git apply --check --reverse` succeeds
-        (i.e. the patch is already applied), so re-running setup is a
-        no-op.  Patches are documented in NANVIX.md.
-        """
-        patches_dir = self.nanvix_dir / "patches"
-        patches = sorted(p for p in patches_dir.glob("*.patch") if p.is_file())
-        for patch in patches:
-            already = subprocess.run(
-                ["git", "apply", "--check", "--reverse", str(patch)],
-                cwd=self.repo_root,
-                capture_output=True,
-            )
-            if already.returncode == 0:
-                log.info(f"Patch already applied: {patch.name}")
-                continue
-            log.info(f"Applying patch: {patch.name}")
-            subprocess.run(
-                ["git", "apply", str(patch)],
-                cwd=self.repo_root,
-                check=True,
-            )
-
     # ------------------------------------------------------------------
     # ZScript hook overrides
     # ------------------------------------------------------------------
 
     def setup(self) -> None:
-        """Resolve sysroot/toolchain, regenerate configure, apply patches."""
+        """Resolve sysroot/toolchain and prepare the autotools tree."""
         super().setup()
         self._ensure_configure()
         self._patch_config_sub()
-        self._apply_patches()
 
     def build(self) -> None:
         """Cross-compile liblzma.a via the upstream autotools."""
@@ -268,6 +242,10 @@ class XzBuild(ZScript):
             self._patch_config_sub()  # re-run in case setup() was skipped
             env = dict(os.environ)
             env.update(overrides)
+            # self.run() defaults to docker=True; when `./z setup --with-docker`
+            # was used, the toolchain image persists and both ./configure and
+            # make below run inside the nanvix/toolchain container.  No host
+            # autotools or compiler is needed for the configure/build path.
             self.run(
                 "./configure",
                 *opts,

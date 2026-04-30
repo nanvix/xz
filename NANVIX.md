@@ -124,7 +124,7 @@ root wrappers `z`/`z.sh`/`z.ps1`, `NANVIX.md`, and `.gitignore`).
 
 | Patch | Rationale | Hypothesis category |
 |-------|-----------|---------------------|
-| _none_ | **Initial port: zero source changes — see `.nanvix/patches/` if this changes.** | n/a |
+| _none_ | **Initial port: zero source changes.** | n/a |
 
 `build-aux/config.sub` is mutated at build time by `./z setup` (sed
 injection of `i686-nanvix`); this file is autotools-generated and
