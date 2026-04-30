@@ -121,10 +121,8 @@ Tests run in three tiers (mirrors the sibling ports):
 The upstream XZ Utils 5.2.5 tree is preserved byte-identical outside
 the Nanvix-specific surface (`.nanvix/`, `.github/workflows/nanvix-*`,
 root wrappers `z`/`z.sh`/`z.ps1`, `NANVIX.md`, and `.gitignore`).
-
-| Patch | Rationale | Hypothesis category |
-|-------|-----------|---------------------|
-| _none_ | **Initial port: zero source changes.** | n/a |
+The initial port required zero source patches; cross-build deviations
+are expressed as configure-time `ac_cv_*` overrides in `.nanvix/z.py`.
 
 `build-aux/config.sub` is mutated at build time by `./z setup` (sed
 injection of `i686-nanvix`); this file is autotools-generated and
