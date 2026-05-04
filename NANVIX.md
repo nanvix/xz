@@ -104,10 +104,19 @@ Produces under `build/`:
 Tests run in three tiers (mirrors the sibling ports):
 
 1. **Smoke** — verify build artefacts exist and meet minimum sizes.
-2. **Integration** — link `tests/smoke.c` against `liblzma.a` to
-   produce `build/smoke.elf`.
-3. **Functional** — run `smoke.elf` under `nanvixd.elf` and assert
-   the `XZ_SMOKE_OK` sentinel on stdout.
+2. **Integration** — cross-compile upstream `tests/check_PROGRAMS`
+   via `make -C tests <test_*>`; assert each
+   `build/tests/test_*.elf` exists and is a static ELF.
+3. **Functional** — run each `build/tests/test_*.elf` under
+   `nanvixd.elf`; PASS iff every test exits 0 (or 77, automake's
+   SKIP convention) and the SKIP set is a subset of the documented
+   skip-list below.
+
+All six upstream C tests (`test_check`, `test_stream_flags`,
+`test_filter_flags`, `test_block_header`, `test_index`,
+`test_bcj_exact_size`) pass under `nanvixd.elf` as of 2026-05-04;
+the skip-list (`_UPSTREAM_TEST_SKIPLIST` in `.nanvix/z.py`) is
+therefore empty.
 
 ```bash
 ./z test                       # all three tiers
@@ -210,8 +219,6 @@ Daily cron at 09:00 UTC (tier1, alongside the other zero-dep ports).
   singular-form convention) once cpython grows a `repository_dispatch`
   listener for it; absent today, so a dispatch would fire into the
   void.
-- Port a subset of upstream `tests/test_*.c` once the Nanvix
-  test-runner supports parameterised C harnesses.
 - Add a shell-driven test tier (`tests/test_*.sh`) gated on a Nanvix
   POSIX-shell becoming available.
 - Re-enable the multi-threaded encoder (`lzma_stream_encoder_mt`) once
