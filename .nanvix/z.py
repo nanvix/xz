@@ -84,19 +84,25 @@ class XzBuild(ZScript):
         dropped (xz has no zlib dependency), -DSQLITE_OMIT_WAL dropped,
         -D_GNU_SOURCE added (zlib precedent for newlib feature gates).
         """
-        toolchain = self._toolchain_path()
-        sysroot = self._sysroot_path()
-        bin_ = toolchain / "bin"
+        # translate_path() returns the host path unchanged when docker mode
+        # is inactive, and the container mount-point (e.g. /mnt/sysroot)
+        # when --with-docker is in effect.  Without this remap, configure's
+        # C compiler probe fails inside the container with "cannot create
+        # executables" because it is told to link against host paths that
+        # do not exist in the container's filesystem.
+        toolchain = self.translate_path(self._toolchain_path())
+        sysroot = self.translate_path(self._sysroot_path())
+        bin_ = f"{toolchain}/bin"
         return {
-            "AR":     str(bin_ / "i686-nanvix-ar"),
-            "AS":     str(bin_ / "i686-nanvix-as"),
-            "CC":     str(bin_ / "i686-nanvix-gcc"),
-            "CXX":    str(bin_ / "i686-nanvix-g++"),
-            "CPP":    str(bin_ / "i686-nanvix-gcc") + " -E",
-            "LD":     str(bin_ / "i686-nanvix-ld"),
-            "RANLIB": str(bin_ / "i686-nanvix-ranlib"),
-            "STRIP":  str(bin_ / "i686-nanvix-strip"),
-            "NM":     str(bin_ / "i686-nanvix-nm"),
+            "AR":     f"{bin_}/i686-nanvix-ar",
+            "AS":     f"{bin_}/i686-nanvix-as",
+            "CC":     f"{bin_}/i686-nanvix-gcc",
+            "CXX":    f"{bin_}/i686-nanvix-g++",
+            "CPP":    f"{bin_}/i686-nanvix-gcc -E",
+            "LD":     f"{bin_}/i686-nanvix-ld",
+            "RANLIB": f"{bin_}/i686-nanvix-ranlib",
+            "STRIP":  f"{bin_}/i686-nanvix-strip",
+            "NM":     f"{bin_}/i686-nanvix-nm",
             "CFLAGS": f"-O2 -D_GNU_SOURCE -I{sysroot}/include",
             "CPPFLAGS": f"-D_GNU_SOURCE -I{sysroot}/include",
             "LDFLAGS": (
@@ -276,7 +282,7 @@ class XzBuild(ZScript):
         stage.mkdir(parents=True)
 
         self.run(
-            "make", "install", f"DESTDIR={stage}",
+            "make", "install", f"DESTDIR={self.translate_path(stage)}",
             cwd=repo,
         )
 
