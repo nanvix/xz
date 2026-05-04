@@ -782,6 +782,7 @@ class XzBuild(ZScript):
             )
 
         failed: list[str] = []
+        unexpected_skips: list[str] = []
         for binary in candidates:
             name = binary.stem
             print(f"RUN  {name}...")
@@ -836,19 +837,36 @@ class XzBuild(ZScript):
                     # guest kernel boots, because its "interactive mode"
                     # console wiring requires real Windows console handles.
                     # Upstream tests/tests.h emits exit 0 on PASS, 77 on
-                    # SKIP, and any other non-zero on FAIL; the exit code
-                    # alone is sufficient to gate pass/fail.
-                    if result.returncode != 0:
-                        print(f"FAIL {name} (exit code {result.returncode})")
-                        failed.append(name)
-                    else:
+                    # SKIP, and any other non-zero on FAIL; mirror the
+                    # Linux helper's _UPSTREAM_TEST_SKIPLIST handling so
+                    # both runners apply the same automake convention.
+                    rc = result.returncode
+                    if rc == 0:
                         print(f"OK   {name}")
+                    elif rc == 77:
+                        if name in _UPSTREAM_TEST_SKIPLIST:
+                            reason = _UPSTREAM_TEST_SKIPLIST[name]
+                            print(f"SKIP {name} ({reason})")
+                        else:
+                            print(f"SKIP {name} (unexpected)")
+                            unexpected_skips.append(name)
+                    else:
+                        print(f"FAIL {name} (exit code {rc})")
+                        failed.append(name)
                 except subprocess.TimeoutExpired:
                     print(f"FAIL {name} (timeout)")
                     failed.append(name)
 
-        if failed:
-            raise RuntimeError(f"{len(failed)} test(s) failed: {' '.join(failed)}")
+        if failed or unexpected_skips:
+            details: list[str] = []
+            if failed:
+                details.append(f"{len(failed)} failed: {' '.join(failed)}")
+            if unexpected_skips:
+                details.append(
+                    "unexpected SKIP (not in _UPSTREAM_TEST_SKIPLIST): "
+                    + " ".join(unexpected_skips)
+                )
+            raise RuntimeError("; ".join(details))
         print(f"\t\t*** All {len(candidates)} tests PASSED ***")
 
     # ------------------------------------------------------------------
