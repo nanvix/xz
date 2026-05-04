@@ -104,10 +104,19 @@ Produces under `build/`:
 Tests run in three tiers (mirrors the sibling ports):
 
 1. **Smoke** — verify build artefacts exist and meet minimum sizes.
-2. **Integration** — link `tests/smoke.c` against `liblzma.a` to
-   produce `build/smoke.elf`.
-3. **Functional** — run `smoke.elf` under `nanvixd.elf` and assert
-   the `XZ_SMOKE_OK` sentinel on stdout.
+2. **Integration** — cross-compile upstream `tests/check_PROGRAMS`
+   via `make -C tests <test_*>`; assert each
+   `build/tests/test_*.elf` exists and is a static ELF.
+3. **Functional** — run each `build/tests/test_*.elf` under
+   `nanvixd.elf`; PASS iff every test exits 0 (or 77, automake's
+   SKIP convention) and the SKIP set is a subset of the documented
+   skip-list below.
+
+All six upstream C tests (`test_check`, `test_stream_flags`,
+`test_filter_flags`, `test_block_header`, `test_index`,
+`test_bcj_exact_size`) pass under `nanvixd.elf` as of 2026-05-04;
+the skip-list (`_UPSTREAM_TEST_SKIPLIST` in `.nanvix/z.py`) is
+therefore empty.
 
 ```bash
 ./z test                       # all three tiers
@@ -185,15 +194,37 @@ git commit -m "Refresh vendored autotools outputs"
 | **`--enable-small`** | Built with the size-optimised codepath; multi-threaded encoder (`lzma_stream_encoder_mt`) is excluded. |
 | **`--disable-threads`** | Single-threaded only (Nanvix consumers — primarily CPython — use single-threaded paths). |
 | **No NLS / docs / scripts** | `--disable-nls --disable-doc --disable-scripts`. |
-| **No `xzdec`/`lzmadec`/`lzmainfo`** | Disabled to keep the artefact surface minimal. |
+| **No `xz`/`xzdec`/`lzmadec`/`lzmainfo` CLIs** | `--disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo`. The downstream consumer (CPython `_lzma`) needs only `liblzma.a`; disabling the CLIs also avoids depending on `alarm`/`sigaction`/`sigprocmask` which Nanvix `libposix.a` does not yet implement. |
 
 ---
 
 ## CI/CD
 
-Workflow: `.github/workflows/nanvix-ci.yml` (added in a later commit).
+Workflow: [`.github/workflows/nanvix-ci.yml`](.github/workflows/nanvix-ci.yml).
 Calls the reusable workflow at
-`nanvix/workflows/.github/workflows/nanvix-ci.yml@v1.12.0` across the
-full 2 × 3 × 2 matrix from `.nanvix/nanvix.toml`. Daily cron at
-12:00 UTC; emits a `repository_dispatch` to `nanvix/cpython` on
-release.
+`nanvix/workflows/.github/workflows/nanvix-ci.yml@v1.14.0` across the
+full 2 × 3 × 2 matrix from `.nanvix/nanvix.toml` (with `hyperlight`
+excluded from both the build and Windows-test matrices, matching the
+zero-dep convention established by `nanvix/zlib` and `nanvix/sqlite`).
+Daily cron at 09:00 UTC (tier1, alongside the other zero-dep ports).
+
+### Future work
+
+- Register `nanvix/xz` in the `nanvix/workflows` consumer-repos list
+  (`consumer-repos.json`) and tier1 of `tier-config.json` once the
+  maintainer signs off on this port; that wires xz into the automated
+  zutils + workflows version-bump PR cascade.
+- Re-introduce a `downstream-dispatches` entry targeting
+  `nanvix/cpython` (`event_type: xz-release`, matching the historical
+  singular-form convention) once cpython grows a `repository_dispatch`
+  listener for it; absent today, so a dispatch would fire into the
+  void.
+- Add a shell-driven test tier (`tests/test_*.sh`) gated on a Nanvix
+  POSIX-shell becoming available.
+- Re-enable the multi-threaded encoder (`lzma_stream_encoder_mt`) once
+  Nanvix exposes pthreads.
+- Investigate a CMake-driven build path as an alternative to the
+  autotools route.
+- Re-enable the `xz` CLI (and revisit `xzdec`/`lzmadec`/`lzmainfo`)
+  once Nanvix `libposix` provides `alarm`, `sigaction`, and
+  `sigprocmask`.

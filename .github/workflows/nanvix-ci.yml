@@ -1,0 +1,63 @@
+# Copyright(c) The Maintainers of Nanvix.
+# Licensed under the MIT License.
+
+name: Nanvix CI
+
+on:
+    schedule:
+        - cron: "0 9 * * *"
+    push:
+        branches: ["nanvix/**"]
+    pull_request:
+        branches: ["nanvix/**"]
+    workflow_dispatch:
+
+permissions:
+    contents: write
+    actions: write
+    issues: write
+    pull-requests: write
+
+concurrency:
+    group: ${{ github.workflow }}-${{ github.ref_name || github.ref || 'default' }}
+    cancel-in-progress: true
+
+jobs:
+    ci:
+        if: github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
+        uses: nanvix/workflows/.github/workflows/nanvix-ci.yml@v1.14.0
+        with:
+            zutil-version: "v0.7.43"
+            platforms: '["hyperlight","microvm"]'
+            process-modes: '["multi-process","single-process","standalone"]'
+            memory-sizes: '["128mb","256mb"]'
+            matrix-exclude: '[{"platform":"hyperlight"}]'
+            windows-matrix-exclude: '[{"platform":"hyperlight"}]'
+            skip-full-test-modes: "[]"
+            caller-event-name: ${{ github.event_name }}
+            windows-test: true
+        secrets:
+            GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+            DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
+
+    ci-scheduled:
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        permissions:
+            contents: write
+            actions: write
+            issues: write
+            pull-requests: write
+        uses: nanvix/workflows/.github/workflows/nanvix-ci.yml@v1.14.0
+        with:
+            zutil-version: "v0.7.43"
+            platforms: '["hyperlight","microvm"]'
+            process-modes: '["multi-process","single-process","standalone"]'
+            memory-sizes: '["128mb","256mb"]'
+            matrix-exclude: '[{"platform":"hyperlight"}]'
+            windows-matrix-exclude: '[{"platform":"hyperlight"}]'
+            skip-full-test-modes: "[]"
+            caller-event-name: "schedule"
+            windows-test: true
+        secrets:
+            GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
+            DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
