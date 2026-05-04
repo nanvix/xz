@@ -50,6 +50,26 @@ _INSTALL_STAGE_REL = Path("build") / "_install"
 # default used by nanvix-zutil's docker layer and by sibling ports.
 _DEFAULT_TOOLCHAIN = "/opt/nanvix"
 
+# Upstream tests/check_PROGRAMS list (tests/Makefile.am:39-46).  The order
+# matches the upstream Makefile so iteration is stable and the names are
+# trivially greppable across the port.
+_UPSTREAM_TEST_NAMES = (
+    "test_check",
+    "test_stream_flags",
+    "test_filter_flags",
+    "test_block_header",
+    "test_index",
+    "test_bcj_exact_size",
+)
+
+# Names (sans .elf) of upstream tests known to exit 77 (automake's SKIP
+# convention) under nanvixd.elf, mapped to a one-line reason.  An empty
+# dict means every upstream test is expected to PASS (exit 0); the runner
+# treats any 77 from a non-listed test as an unexpected SKIP and fails the
+# tier.  Kept here (not a sidecar file) so a grep from the runner lands on
+# both the data and the consumer in one place.
+_UPSTREAM_TEST_SKIPLIST: dict[str, str] = {}
+
 IS_WINDOWS = sys.platform == "win32"
 
 
@@ -249,15 +269,16 @@ class XzBuild(ZScript):
         # Stage a curated install image and copy the subset we ship into
         # build/ at the layout the schema/release path expects.
         self._stage_artefacts()
-        # Build the smoke.elf test binary now, while we are inside the
-        # docker-wrapped build context.  ``nanvix-zutil test`` is
-        # deliberately host-only (script.py:730 — "test and benchmark
-        # run on the host"), so the cross-compiler is unreachable from
-        # the test step in CI when --with-docker was used during setup.
-        # By producing build/smoke.elf here, the test tiers below only
-        # need to *execute* a pre-built artefact on the host (via
-        # nanvixd.elf, which is a Linux host binary in the sysroot).
-        self._build_smoke()
+        # Cross-compile upstream's tests/check_PROGRAMS now, while we
+        # are inside the docker-wrapped build context.  ``nanvix-zutil
+        # test`` is deliberately host-only (script.py:730 — "test and
+        # benchmark run on the host"), so the cross-compiler is
+        # unreachable from the test step in CI when --with-docker was
+        # used during setup.  By producing build/tests/test_*.elf here,
+        # the test tiers below only need to *execute* the pre-built
+        # artefacts on the host (via nanvixd.elf, which is a Linux host
+        # binary in the sysroot).
+        self._build_upstream_tests()
 
     def _stage_artefacts(self) -> None:
         """Install into build/_install and copy outputs into build/."""
@@ -316,6 +337,107 @@ class XzBuild(ZScript):
         )
 
         log.info(f"Staged artefacts under {build_dir}")
+
+    def _build_upstream_tests(self) -> list[Path]:
+        """Cross-compile upstream tests/check_PROGRAMS into build/tests/.
+
+        Drives ``make -C tests check_PROGRAMS`` inside the same
+        docker-wrapped build context as :meth:`build`, then copies the
+        libtool-unwrapped ELFs into ``build/tests/test_*.elf`` and
+        returns their paths in the order declared by upstream's
+        ``tests/Makefile.am``.
+
+        Idempotent: if every destination ELF is newer than its source
+        ``tests/<name>.c`` and ``build/liblzma.a``, the rebuild is
+        skipped and the existing destinations are returned.
+        """
+        repo = self.repo_root
+        build_dir = repo / "build"
+        liblzma = build_dir / "liblzma.a"
+        if not liblzma.is_file():
+            log.fatal(
+                f"liblzma.a missing at {liblzma}; run `./z build` first.",
+                code=EXIT_BUILD_FAILURE,
+            )
+
+        dest_dir = build_dir / "tests"
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        dests = [dest_dir / f"{name}.elf" for name in _UPSTREAM_TEST_NAMES]
+        srcs = [repo / "tests" / f"{name}.c" for name in _UPSTREAM_TEST_NAMES]
+
+        inputs_mtime = max(
+            liblzma.stat().st_mtime,
+            *(s.stat().st_mtime for s in srcs if s.exists()),
+        )
+        if all(
+            d.is_file() and d.stat().st_mtime >= inputs_mtime for d in dests
+        ):
+            return dests
+
+        # Build the env on top of the canonical configure overrides so
+        # CC/AR/etc. all point at the cross toolchain.  We additionally
+        # need to override LDFLAGS+LIBS for the make-time link of the
+        # check_PROGRAMS targets, but make will not honour env-set
+        # values for variables that the generated Makefile assigns
+        # unconditionally (LDFLAGS and LIBS are baked in at configure
+        # time).  We therefore pass the override on the make command
+        # line below, where it wins over the Makefile assignment.
+        #
+        # The override itself: libtool reorders anything in LDFLAGS
+        # ahead of LDADD when composing the final link line for the
+        # check_PROGRAMS targets, which would split the
+        # --start-group/--end-group group across liblzma.la and break
+        # cyclic resolution between liblzma/libposix/libc/libm.  We
+        # therefore drop the link group from LDFLAGS and carry it in
+        # LIBS as a single comma-joined -Wl, token, which libtool
+        # preserves positionally (it appears after the convenience
+        # library at link time).  The configure-time LIBS="" invariant
+        # in _configure_env_overrides is unaffected — that recipe is
+        # only consumed by ./configure, never by make.
+        sysroot = self.translate_path(self._sysroot_path())
+        env = dict(os.environ)
+        env.update(self._configure_env_overrides())
+        ldflags_override = f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib"
+        libs_override = "-Wl,--start-group,-lposix,-lc,-lm,--end-group"
+
+        try:
+            nproc = str(os.cpu_count() or 1)
+        except Exception:
+            nproc = "1"
+
+        log.info("Building upstream tests/check_PROGRAMS")
+        # ``check_PROGRAMS`` is a Make variable, not a target.  Pass the
+        # individual binary names as explicit targets so we build them
+        # without running them (``make check`` would build *and* run
+        # under upstream's test harness, which we deliberately bypass).
+        self.run(
+            "make",
+            "-C",
+            "tests",
+            f"LDFLAGS={ldflags_override}",
+            f"LIBS={libs_override}",
+            *_UPSTREAM_TEST_NAMES,
+            f"-j{nproc}",
+            cwd=repo,
+            env=env,
+        )
+
+        # libtool drops the unwrapped ELF under tests/.libs/<name>; in
+        # the rare case it inlines the binary directly into tests/<name>
+        # (e.g. when no shared-library wrapper is needed) fall back to
+        # the flat path.
+        for name, dest in zip(_UPSTREAM_TEST_NAMES, dests):
+            src = repo / "tests" / ".libs" / name
+            if not src.is_file():
+                src = repo / "tests" / name
+            if not src.is_file():
+                log.fatal(
+                    f"upstream test binary missing: {name} "
+                    "(looked under tests/.libs/ and tests/)",
+                    code=EXIT_BUILD_FAILURE,
+                )
+            shutil.copy2(src, dest)
+        return dests
 
     # ------------------------------------------------------------------
     # Test ladder
@@ -384,52 +506,93 @@ class XzBuild(ZScript):
         log.info("  PASS: xz smoke tests")
 
     def _test_integration(self) -> None:
-        """Build smoke.elf and confirm it links + is statically linked."""
+        """Confirm every upstream test binary is a static ELF."""
         log.info("=== xz integration tests ===")
-        smoke_elf = self._build_smoke()
-        size = smoke_elf.stat().st_size
-        if size < 50_000:
-            log.fatal(
-                f"integration: smoke.elf too small ({size} bytes)",
-                code=EXIT_BUILD_FAILURE,
-            )
+        elfs = self._build_upstream_tests()
         # Verify ELF format via magic bytes -- the source of truth
         # and dependency-free.  file(1), if present, is queried only
         # for the human-readable 'statically linked' confirmation; its
         # absence (e.g. on minimal Windows runners) must not fail the
-        # tier.
-        with smoke_elf.open("rb") as fh:
-            magic = fh.read(4)
-        if magic != b"\x7fELF":
-            log.fatal(
-                f"integration: smoke.elf is not an ELF binary (magic={magic!r})",
-                code=EXIT_BUILD_FAILURE,
-            )
-        try:
-            file_out = subprocess.run(
-                ["file", str(smoke_elf)],
-                check=True,
-                capture_output=True,
-                text=True,
-            ).stdout.lower()
-        except (FileNotFoundError, subprocess.CalledProcessError):
-            file_out = ""
-        if file_out and "statically" not in file_out:
-            log.info("  WARN: file(1) did not report 'statically linked'")
-        log.info(f"  OK: smoke.elf ({size} bytes, ELF)")
+        # tier.  No size floor: the six upstream ELFs vary widely;
+        # presence + ELF magic is the contract.
+        for elf in elfs:
+            if not elf.is_file():
+                log.fatal(
+                    f"integration: missing {elf}",
+                    code=EXIT_BUILD_FAILURE,
+                )
+            with elf.open("rb") as fh:
+                magic = fh.read(4)
+            if magic != b"\x7fELF":
+                log.fatal(
+                    f"integration: {elf.name} is not an ELF binary "
+                    f"(magic={magic!r})",
+                    code=EXIT_BUILD_FAILURE,
+                )
+            try:
+                file_out = subprocess.run(
+                    ["file", str(elf)],
+                    check=True,
+                    capture_output=True,
+                    text=True,
+                ).stdout.lower()
+            except (FileNotFoundError, subprocess.CalledProcessError):
+                file_out = ""
+            if file_out and "statically" not in file_out:
+                log.info(
+                    f"  WARN: file(1) did not report 'statically linked' "
+                    f"for {elf.name}"
+                )
+            log.info(f"  OK: {elf.name} ({elf.stat().st_size} bytes, ELF)")
         log.info("  PASS: xz integration tests")
 
     def _test_functional(self) -> None:
-        """Run smoke.elf inside nanvixd.elf and grep for XZ_SMOKE_OK.
+        """Run a representative upstream test under nanvixd.elf.
 
-        Mirrors the three-arm shape from sqlite's Makefile.nanvix:
-        Linux+Docker (kvm-wrapped run via the toolchain image), Linux
-        host (native nanvixd.elf out of the sysroot), and standalone
-        ramfs build for any process mode (the kernel always boots from
-        a ramfs; the difference between modes is the in-VM workload).
+        Commit 1 ships a single representative end-to-end (the cheapest
+        of the six upstream tests, ``test_check``); a follow-up widens
+        the call site to the full set returned by
+        :meth:`_build_upstream_tests`.  The runner helper accepts a
+        list so widening is a content change, not a structural rewrite.
         """
         log.info("=== xz functional tests ===")
-        smoke_elf = self._build_smoke()
+        elfs = self._build_upstream_tests()
+        rep_name = "test_check.elf"
+        rep = next((e for e in elfs if e.name == rep_name), None)
+        if rep is None:
+            log.fatal(
+                f"functional: representative {rep_name} not built",
+                code=EXIT_BUILD_FAILURE,
+            )
+        # single_ramfs=True: spike confirms the six ELFs fit in one
+        # ramfs comfortably; nanvixd.elf is invoked once per ELF, all
+        # against the same ramfs image.
+        self._run_elfs_under_nanvixd([rep], single_ramfs=True)
+        log.info("  PASS: xz functional tests")
+
+    def _run_elfs_under_nanvixd(
+        self, elfs: list[Path], *, single_ramfs: bool
+    ) -> None:
+        """Run a list of ELFs under nanvixd.elf and score by exit code.
+
+        Per automake convention (``tests/tests.h``): exit 0 = PASS,
+        exit 77 = SKIP, anything else = FAIL.  The tier passes iff
+        every ELF returned 0 or 77 *and* every 77-exit ELF name appears
+        in :data:`_UPSTREAM_TEST_SKIPLIST` (an unexpected SKIP fails
+        the tier so a silently broken build cannot mask itself by
+        always returning 77).  Captured stdout/stderr is printed on
+        FAIL only.
+
+        ``single_ramfs=True``  → one ramfs containing every ELF, one
+            ``nanvixd.elf`` invocation per ELF.
+        ``single_ramfs=False`` → one fresh ramfs per ELF (fall-back if
+            ``mkramfs`` ever refuses sibling ELFs).
+
+        The host-absolute path passed after ``--`` is load-bearing:
+        ``nanvixd.elf`` ``mmap()``s the user binary from the host
+        filesystem, not from the ramfs (the ramfs only carries
+        auxiliary state like ``/tmp``).
+        """
         sysroot = self._sysroot_path()
         nanvixd = sysroot / "bin" / "nanvixd.elf"
         mkramfs = sysroot / "bin" / "mkramfs.elf"
@@ -441,30 +604,18 @@ class XzBuild(ZScript):
                     hint="Re-run `./z setup` to refresh the sysroot.",
                 )
 
-        with tempfile.TemporaryDirectory(prefix="xz_smoke_") as tmp:
-            tmp_path = Path(tmp)
-            ramfs_dir = tmp_path / "ramfs"
-            ramfs_dir.mkdir()
-            (ramfs_dir / "tmp").mkdir()
-            shutil.copy2(smoke_elf, ramfs_dir / "smoke.elf")
-            ramfs_img = tmp_path / "rootfs.img"
-            subprocess.run(
-                [str(mkramfs), "-o", str(ramfs_img), str(ramfs_dir)],
-                check=True,
-                timeout=60,
-            )
+        failures: list[tuple[str, int]] = []
+        unexpected_skips: list[str] = []
+
+        def _run_one(elf: Path, ramfs_img: Path) -> None:
             cmd = [
                 str(nanvixd),
                 "-bin-dir",
                 str(sysroot / "bin"),
                 "-ramfs",
                 str(ramfs_img),
-                # nanvixd loads the user binary via host-side mmap()
-                # rather than from inside the ramfs, so this must be an
-                # absolute host path (the ramfs only carries auxiliary
-                # state like /tmp).
                 "--",
-                str(smoke_elf.resolve()),
+                str(elf.resolve()),
             ]
             log.info(f"$ {' '.join(cmd)}")
             result = subprocess.run(
@@ -473,98 +624,82 @@ class XzBuild(ZScript):
                 capture_output=True,
                 text=True,
             )
-            sys.stdout.write(result.stdout)
-            sys.stderr.write(result.stderr)
-            if result.returncode != 0:
-                log.fatal(
-                    f"functional: nanvixd.elf exited {result.returncode}",
-                    code=EXIT_BUILD_FAILURE,
+            rc = result.returncode
+            name = elf.stem
+            if rc == 0:
+                log.info(f"  PASS: {name}")
+            elif rc == 77:
+                if name in _UPSTREAM_TEST_SKIPLIST:
+                    log.info(
+                        f"  SKIP: {name} ({_UPSTREAM_TEST_SKIPLIST[name]})"
+                    )
+                else:
+                    log.info(f"  SKIP (unexpected): {name}")
+                    unexpected_skips.append(name)
+            else:
+                sys.stdout.write(result.stdout)
+                sys.stderr.write(result.stderr)
+                log.info(f"  FAIL: {name} (exit {rc})")
+                failures.append((name, rc))
+
+        if single_ramfs:
+            with tempfile.TemporaryDirectory(prefix="xz_tests_") as tmp:
+                tmp_path = Path(tmp)
+                ramfs_dir = tmp_path / "ramfs"
+                ramfs_dir.mkdir()
+                (ramfs_dir / "tmp").mkdir()
+                for elf in elfs:
+                    shutil.copy2(elf, ramfs_dir / elf.name)
+                ramfs_img = tmp_path / "rootfs.img"
+                subprocess.run(
+                    [str(mkramfs), "-o", str(ramfs_img), str(ramfs_dir)],
+                    check=True,
+                    timeout=60,
                 )
-            if "XZ_SMOKE_OK" not in result.stdout:
-                log.fatal(
-                    "functional: smoke.elf did not print XZ_SMOKE_OK",
-                    code=EXIT_BUILD_FAILURE,
+                for elf in elfs:
+                    _run_one(elf, ramfs_img)
+        else:
+            for elf in elfs:
+                with tempfile.TemporaryDirectory(
+                    prefix=f"xz_test_{elf.stem}_"
+                ) as tmp:
+                    tmp_path = Path(tmp)
+                    ramfs_dir = tmp_path / "ramfs"
+                    ramfs_dir.mkdir()
+                    (ramfs_dir / "tmp").mkdir()
+                    shutil.copy2(elf, ramfs_dir / elf.name)
+                    ramfs_img = tmp_path / "rootfs.img"
+                    subprocess.run(
+                        [str(mkramfs), "-o", str(ramfs_img), str(ramfs_dir)],
+                        check=True,
+                        timeout=60,
+                    )
+                    _run_one(elf, ramfs_img)
+
+        if failures or unexpected_skips:
+            details: list[str] = []
+            if failures:
+                details.append(
+                    "FAIL: "
+                    + ", ".join(f"{n} (exit {rc})" for n, rc in failures)
                 )
-        log.info("  PASS: xz functional tests")
-
-    def _build_smoke(self) -> Path:
-        """Compile .nanvix/tests/smoke.c into build/smoke.elf.
-
-        Statically links against ``liblzma.a`` plus the standard Nanvix
-        triplet (``libposix``, ``libc``, ``libm``) using the canonical
-        linker recipe (``-T <sysroot>/lib/user.ld``).  Idempotent: if
-        ``smoke.elf`` is newer than ``smoke.c`` and ``liblzma.a`` it
-        returns immediately.
-
-        The cross-compiler invocation is routed through ``self.run`` so
-        it transparently dispatches into the toolchain Docker container
-        when ``./z setup --with-docker`` was used (the default in CI,
-        where ``i686-nanvix-gcc`` exists only inside the image and not
-        on the host runner).  All absolute paths handed to gcc are
-        translated via ``self.translate_path`` so they resolve correctly
-        on both sides of the docker boundary.
-        """
-        toolchain = self._toolchain_path()
-        sysroot = self._sysroot_path()
-        src = self.nanvix_dir / "tests" / "smoke.c"
-        build_dir = self.repo_root / "build"
-        liblzma = build_dir / "liblzma.a"
-        smoke_elf = build_dir / "smoke.elf"
-        include_dir = build_dir / "include"
-
-        if not src.is_file():
+            if unexpected_skips:
+                details.append(
+                    "unexpected SKIP (not in _UPSTREAM_TEST_SKIPLIST): "
+                    + ", ".join(unexpected_skips)
+                )
             log.fatal(
-                f"smoke source missing: {src}",
+                "functional: " + "; ".join(details),
                 code=EXIT_BUILD_FAILURE,
             )
-        if not liblzma.is_file():
-            log.fatal(
-                f"liblzma.a missing at {liblzma}; run `./z build` first.",
-                code=EXIT_BUILD_FAILURE,
-            )
-        if smoke_elf.is_file():
-            inputs_mtime = max(src.stat().st_mtime, liblzma.stat().st_mtime)
-            if smoke_elf.stat().st_mtime >= inputs_mtime:
-                return smoke_elf
-
-        log.info(f"Compiling smoke.elf -> {smoke_elf}")
-        # translate_path() returns the host path unchanged when docker
-        # mode is inactive, and the container mount-point when it is.
-        # Same pattern as _configure_env_overrides() above.
-        gcc_p = self.translate_path(toolchain / "bin" / "i686-nanvix-gcc")
-        sysroot_p = self.translate_path(sysroot)
-        include_p = self.translate_path(include_dir)
-        src_p = self.translate_path(src)
-        smoke_elf_p = self.translate_path(smoke_elf)
-        liblzma_p = self.translate_path(liblzma)
-        self.run(
-            str(gcc_p),
-            "-O2",
-            "-Wall",
-            f"-I{include_p}",
-            "-static",
-            f"-T{sysroot_p}/lib/user.ld",
-            f"-L{sysroot_p}/lib",
-            "-o",
-            str(smoke_elf_p),
-            str(src_p),
-            "-Wl,--start-group",
-            "-lposix",
-            "-lc",
-            "-lm",
-            str(liblzma_p),
-            "-Wl,--end-group",
-            cwd=self.repo_root,
-        )
-        return smoke_elf
 
     def _run_tests_windows(self) -> None:
-        """Run smoke.elf natively on Windows via nanvixd.exe.
+        """Run upstream check_PROGRAMS natively on Windows via nanvixd.exe.
 
         Only standalone mode is exercised on Windows; multi-process
         and single-process require linuxd which is Linux-only.  The
-        binary discovery allowlist is restricted to ``smoke.elf`` so
-        spurious ELFs in the tree are not booted.
+        binary discovery allowlist is restricted to the six upstream
+        ``test_*.elf`` so spurious ELFs in the tree are not booted.
         """
         if self.config.deployment_mode != "standalone":
             print(
@@ -602,25 +737,38 @@ class XzBuild(ZScript):
         # transferred -- only ELFs are -- and the cross-toolchain isn't
         # installed on Windows runners.  The smoke and integration tiers
         # validate the *build environment* (artefact presence + sizes,
-        # smoke.elf compile + ELF-magic sniff) and already ran on the Linux
-        # build job before the artefact was uploaded.  Re-running them here
-        # would only fail spuriously.  Mirror nanvix/zlib (`example.elf`)
-        # and nanvix/sqlite (`sqlite3.elf`): discover the pre-built smoke.elf
-        # via the allowlist and run the functional tier (boot via
-        # nanvixd.exe + grep stdout for XZ_SMOKE_OK) only.
+        # ELF-magic sniff of every test_*.elf) and already ran on the
+        # Linux build job before the artefact was uploaded.  Re-running
+        # them here would only fail spuriously.  Mirror nanvix/zlib
+        # (`example.elf`) and nanvix/sqlite (`sqlite3.elf`): discover the
+        # pre-built upstream tests via the allowlist and run the
+        # functional tier (boot under nanvixd.exe, score by exit code).
 
-        test_allowlist = {"smoke.elf"}
+        test_allowlist = {f"{n}.elf" for n in _UPSTREAM_TEST_NAMES}
+        # Commit 1: drive a single representative end-to-end on Windows
+        # too, to keep this change reviewable.  A follow-up widens the
+        # iteration to the full allowlist.
+        iteration_set = {"test_check.elf"}
         candidates: list[Path] = []
-        for d in (self.repo_root / "build", self.repo_root):
+        seen: set[str] = set()
+        for d in (
+            self.repo_root / "build" / "tests",
+            self.repo_root / "build",
+            self.repo_root,
+        ):
             if d.is_dir():
                 for p in sorted(d.glob("*.elf")):
-                    if p.name in test_allowlist and p.name not in {
-                        x.name for x in candidates
-                    }:
+                    if (
+                        p.name in test_allowlist
+                        and p.name in iteration_set
+                        and p.name not in seen
+                    ):
                         candidates.append(p)
+                        seen.add(p.name)
         if not candidates:
             log.fatal(
-                f"No allowlisted test binaries found (expected: {sorted(test_allowlist)}).",
+                f"No allowlisted test binaries found (expected one of: "
+                f"{sorted(iteration_set)}).",
                 code=EXIT_MISSING_DEP,
                 hint="Build first via `./z build`.",
             )
@@ -664,10 +812,10 @@ class XzBuild(ZScript):
                             # Pass the absolute host path (matches
                             # nanvix/sqlite's working Windows pattern).
                             # Earlier versions used the in-ramfs relative
-                            # path `./smoke.elf` (zlib's pattern) but that
-                            # caused nanvixd.exe to exit 255 right after
-                            # boot for this binary, while sqlite's host-path
-                            # form works on the same Windows runner.
+                            # path (zlib's pattern) but that caused
+                            # nanvixd.exe to exit 255 right after boot,
+                            # while sqlite's host-path form works on the
+                            # same Windows runner.
                             "--",
                             str(binary.resolve()),
                         ],
@@ -679,10 +827,9 @@ class XzBuild(ZScript):
                     # nanvixd.exe abort with exit 255 on Windows before the
                     # guest kernel boots, because its "interactive mode"
                     # console wiring requires real Windows console handles.
-                    # smoke.c already returns non-zero on any liblzma error
-                    # or round-trip mismatch, so the exit code is sufficient
-                    # to gate pass/fail; the XZ_SMOKE_OK sentinel was only
-                    # ever a belt-and-suspenders check.
+                    # Upstream tests/tests.h emits exit 0 on PASS, 77 on
+                    # SKIP, and any other non-zero on FAIL; the exit code
+                    # alone is sufficient to gate pass/fail.
                     if result.returncode != 0:
                         print(f"FAIL {name} (exit code {result.returncode})")
                         failed.append(name)
