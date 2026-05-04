@@ -12,7 +12,6 @@ Usage:
 from __future__ import annotations
 
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -168,54 +167,29 @@ class XzBuild(ZScript):
     # ------------------------------------------------------------------
 
     def _ensure_configure(self) -> None:
-        """Generate ./configure via autogen.sh if upstream did not ship it.
+        """Verify the vendored ./configure is present.
 
-        Tarball releases of xz ship a pre-generated configure; git
-        checkouts do not.  Probe for ./configure and run autogen.sh
-        only when missing, so checked-out trees Just Work.
+        The xz port vendors the autotools-generated outputs (configure,
+        aclocal.m4, config.h.in, Makefile.in, build-aux/*, m4/*, po/*)
+        directly into the port repo so CI does not need autoconf,
+        autopoint, libtool, automake, or gettext inside the toolchain
+        Docker image.  Refresh procedure: ``sh ./autogen.sh --no-po4a``
+        on a host with autotools, then ``git add -f`` the regenerated
+        files (see NANVIX.md / Refreshing vendored autotools outputs).
         """
         configure = self.repo_root / "configure"
-        if configure.exists():
-            return
-        autogen = self.repo_root / "autogen.sh"
-        if not autogen.exists():
+        if not configure.exists():
             log.fatal(
-                "Neither ./configure nor ./autogen.sh present.",
+                "./configure is missing from the port tree.",
                 code=EXIT_BUILD_FAILURE,
-                hint="The upstream tree appears incomplete.",
+                hint=(
+                    "The autotools outputs are vendored; if they have "
+                    "been deleted, regenerate with `sh ./autogen.sh "
+                    "--no-po4a` on a host with autoconf+automake+"
+                    "libtool+autopoint installed, then `git add -f` "
+                    "the result."
+                ),
             )
-        log.info("./configure missing -- running autogen.sh --no-po4a")
-        self.run("sh", "./autogen.sh", "--no-po4a", docker=False)
-
-    def _patch_config_sub(self) -> None:
-        """Idempotently teach build-aux/config.sub about i686-nanvix.
-
-        Mirrors the libffi port's Makefile.nanvix sed recipe.  config.sub
-        is autotools-generated and excluded from the upstream-byte-identity
-        invariant, so this in-tree mutation does not warrant a row in
-        NANVIX.md's source-changes table.
-        """
-        cs = self.repo_root / "build-aux" / "config.sub"
-        if not cs.exists():
-            return  # autogen.sh hasn't run yet; will be retried after configure
-        text = cs.read_text()
-        if "nanvix" in text:
-            return
-        # libffi precedent: extend the existing fiwix* arm of the OS table.
-        new_text, n = re.subn(
-            r"(\| fiwix\* )(\))",
-            r"\1| nanvix* \2",
-            text,
-            count=1,
-        )
-        if n == 0:
-            log.fatal(
-                "Failed to patch build-aux/config.sub: fiwix* anchor not found.",
-                code=EXIT_BUILD_FAILURE,
-                hint="config.sub layout differs from the expected GNU template.",
-            )
-        cs.write_text(new_text)
-        log.info("Patched build-aux/config.sub for i686-nanvix")
 
     # ------------------------------------------------------------------
     # ZScript hook overrides
@@ -225,7 +199,6 @@ class XzBuild(ZScript):
         """Resolve sysroot/toolchain and prepare the autotools tree."""
         super().setup()
         self._ensure_configure()
-        self._patch_config_sub()
 
     def build(self) -> None:
         """Cross-compile liblzma.a via the upstream autotools."""
@@ -245,7 +218,6 @@ class XzBuild(ZScript):
                     "Configure inputs changed since last build; "
                     "re-running ./configure."
                 )
-            self._patch_config_sub()  # re-run in case setup() was skipped
             env = dict(os.environ)
             env.update(overrides)
             # self.run() defaults to docker=True; when `./z setup --with-docker`
