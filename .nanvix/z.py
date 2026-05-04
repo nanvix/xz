@@ -393,6 +393,18 @@ class XzBuild(ZScript):
                 f"integration: smoke.elf too small ({size} bytes)",
                 code=EXIT_BUILD_FAILURE,
             )
+        # Verify ELF format via magic bytes -- the source of truth
+        # and dependency-free.  file(1), if present, is queried only
+        # for the human-readable 'statically linked' confirmation; its
+        # absence (e.g. on minimal Windows runners) must not fail the
+        # tier.
+        with smoke_elf.open("rb") as fh:
+            magic = fh.read(4)
+        if magic != b"\x7fELF":
+            log.fatal(
+                f"integration: smoke.elf is not an ELF binary (magic={magic!r})",
+                code=EXIT_BUILD_FAILURE,
+            )
         try:
             file_out = subprocess.run(
                 ["file", str(smoke_elf)],
@@ -402,12 +414,7 @@ class XzBuild(ZScript):
             ).stdout.lower()
         except (FileNotFoundError, subprocess.CalledProcessError):
             file_out = ""
-        if "elf" not in file_out:
-            log.fatal(
-                f"integration: smoke.elf is not an ELF binary ({file_out!r})",
-                code=EXIT_BUILD_FAILURE,
-            )
-        if "statically" not in file_out:
+        if file_out and "statically" not in file_out:
             log.info("  WARN: file(1) did not report 'statically linked'")
         log.info(f"  OK: smoke.elf ({size} bytes, ELF)")
         log.info("  PASS: xz integration tests")
@@ -447,9 +454,6 @@ class XzBuild(ZScript):
                 timeout=60,
             )
             cmd = [
-                "timeout",
-                "--foreground",
-                "120",
                 str(nanvixd),
                 "-bin-dir",
                 str(sysroot / "bin"),
