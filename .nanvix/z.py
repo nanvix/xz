@@ -369,9 +369,7 @@ class XzBuild(ZScript):
             liblzma.stat().st_mtime,
             *(s.stat().st_mtime for s in srcs if s.exists()),
         )
-        if all(
-            d.is_file() and d.stat().st_mtime >= inputs_mtime for d in dests
-        ):
+        if all(d.is_file() and d.stat().st_mtime >= inputs_mtime for d in dests):
             return dests
 
         # Build the env on top of the canonical configure overrides so
@@ -574,9 +572,7 @@ class XzBuild(ZScript):
         self._run_elfs_under_nanvixd(elfs, single_ramfs=True)
         log.info("  PASS: xz functional tests")
 
-    def _run_elfs_under_nanvixd(
-        self, elfs: list[Path], *, single_ramfs: bool
-    ) -> None:
+    def _run_elfs_under_nanvixd(self, elfs: list[Path], *, single_ramfs: bool) -> None:
         """Run a list of ELFs under nanvixd.elf and score by exit code.
 
         Per automake convention (``tests/tests.h``): exit 0 = PASS,
@@ -634,9 +630,7 @@ class XzBuild(ZScript):
                 log.info(f"  PASS: {name}")
             elif rc == 77:
                 if name in _UPSTREAM_TEST_SKIPLIST:
-                    log.info(
-                        f"  SKIP: {name} ({_UPSTREAM_TEST_SKIPLIST[name]})"
-                    )
+                    log.info(f"  SKIP: {name} ({_UPSTREAM_TEST_SKIPLIST[name]})")
                 else:
                     log.info(f"  SKIP (unexpected): {name}")
                     unexpected_skips.append(name)
@@ -664,9 +658,7 @@ class XzBuild(ZScript):
                     _run_one(elf, ramfs_img)
         else:
             for elf in elfs:
-                with tempfile.TemporaryDirectory(
-                    prefix=f"xz_test_{elf.stem}_"
-                ) as tmp:
+                with tempfile.TemporaryDirectory(prefix=f"xz_test_{elf.stem}_") as tmp:
                     tmp_path = Path(tmp)
                     ramfs_dir = tmp_path / "ramfs"
                     ramfs_dir.mkdir()
@@ -684,8 +676,7 @@ class XzBuild(ZScript):
             details: list[str] = []
             if failures:
                 details.append(
-                    "FAIL: "
-                    + ", ".join(f"{n} (exit {rc})" for n, rc in failures)
+                    "FAIL: " + ", ".join(f"{n} (exit {rc})" for n, rc in failures)
                 )
             if unexpected_skips:
                 details.append(
@@ -751,9 +742,7 @@ class XzBuild(ZScript):
         test_allowlist = {f"{n}.elf" for n in _UPSTREAM_TEST_NAMES}
         # Iterate the full allowlist minus anything in the skiplist;
         # skipped names are logged but not booted.
-        iteration_set = test_allowlist - {
-            f"{n}.elf" for n in _UPSTREAM_TEST_SKIPLIST
-        }
+        iteration_set = test_allowlist - {f"{n}.elf" for n in _UPSTREAM_TEST_SKIPLIST}
         for skipped in sorted(test_allowlist - iteration_set):
             stem = skipped[: -len(".elf")]
             print(f"SKIP {stem} ({_UPSTREAM_TEST_SKIPLIST[stem]})")
