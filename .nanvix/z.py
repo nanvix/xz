@@ -547,27 +547,31 @@ class XzBuild(ZScript):
         log.info("  PASS: xz integration tests")
 
     def _test_functional(self) -> None:
-        """Run a representative upstream test under nanvixd.elf.
+        """Run every upstream check_PROGRAMS test under nanvixd.elf.
 
-        Commit 1 ships a single representative end-to-end (the cheapest
-        of the six upstream tests, ``test_check``); a follow-up widens
-        the call site to the full set returned by
-        :meth:`_build_upstream_tests`.  The runner helper accepts a
-        list so widening is a content change, not a structural rewrite.
+        Filters out names listed in :data:`_UPSTREAM_TEST_SKIPLIST`
+        (logs one ``SKIP`` line per filtered entry) and hands the
+        remainder to :meth:`_run_elfs_under_nanvixd`.  The runner's
+        77-handling stays in place as defence in depth in case a
+        non-skiplisted test starts emitting SKIP deliberately.
         """
         log.info("=== xz functional tests ===")
-        elfs = self._build_upstream_tests()
-        rep_name = "test_check.elf"
-        rep = next((e for e in elfs if e.name == rep_name), None)
-        if rep is None:
-            log.fatal(
-                f"functional: representative {rep_name} not built",
-                code=EXIT_BUILD_FAILURE,
-            )
-        # single_ramfs=True: spike confirms the six ELFs fit in one
-        # ramfs comfortably; nanvixd.elf is invoked once per ELF, all
-        # against the same ramfs image.
-        self._run_elfs_under_nanvixd([rep], single_ramfs=True)
+        all_elfs = self._build_upstream_tests()
+        elfs: list[Path] = []
+        for elf in all_elfs:
+            reason = _UPSTREAM_TEST_SKIPLIST.get(elf.stem)
+            if reason is not None:
+                log.info(f"  SKIP: {elf.stem} ({reason})")
+            else:
+                elfs.append(elf)
+        # Spike 2026-05-04: total ramfs payload across the six ELFs
+        # measures ~7.2 MiB (well under the 32 MiB default microvm
+        # heap), and a single nanvixd.elf boot per ELF against one
+        # shared ramfs image runs each test cleanly to PASS.  Both
+        # gates (a) (mkramfs accepts sibling ELFs) and (c) (every
+        # test exits 0 from a shared ramfs) passed, so single_ramfs
+        # is True; flip to False if either regresses.
+        self._run_elfs_under_nanvixd(elfs, single_ramfs=True)
         log.info("  PASS: xz functional tests")
 
     def _run_elfs_under_nanvixd(
@@ -745,10 +749,14 @@ class XzBuild(ZScript):
         # functional tier (boot under nanvixd.exe, score by exit code).
 
         test_allowlist = {f"{n}.elf" for n in _UPSTREAM_TEST_NAMES}
-        # Commit 1: drive a single representative end-to-end on Windows
-        # too, to keep this change reviewable.  A follow-up widens the
-        # iteration to the full allowlist.
-        iteration_set = {"test_check.elf"}
+        # Iterate the full allowlist minus anything in the skiplist;
+        # skipped names are logged but not booted.
+        iteration_set = test_allowlist - {
+            f"{n}.elf" for n in _UPSTREAM_TEST_SKIPLIST
+        }
+        for skipped in sorted(test_allowlist - iteration_set):
+            stem = skipped[: -len(".elf")]
+            print(f"SKIP {stem} ({_UPSTREAM_TEST_SKIPLIST[stem]})")
         candidates: list[Path] = []
         seen: set[str] = set()
         for d in (
@@ -767,7 +775,7 @@ class XzBuild(ZScript):
                         seen.add(p.name)
         if not candidates:
             log.fatal(
-                f"No allowlisted test binaries found (expected one of: "
+                f"No allowlisted test binaries found (expected: "
                 f"{sorted(iteration_set)}).",
                 code=EXIT_MISSING_DEP,
                 hint="Build first via `./z build`.",
