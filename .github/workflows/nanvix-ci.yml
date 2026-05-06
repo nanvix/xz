@@ -31,8 +31,8 @@ jobs:
             platforms: '["hyperlight","microvm"]'
             process-modes: '["multi-process","single-process","standalone"]'
             memory-sizes: '["128mb","256mb"]'
-            matrix-exclude: '[{"platform":"hyperlight"}]'
-            windows-matrix-exclude: '[{"platform":"hyperlight"}]'
+            matrix-exclude: '[{"platform":"hyperlight","process-mode":"multi-process"},{"platform":"hyperlight","process-mode":"single-process"}]'
+            windows-matrix-exclude: '[]'
             skip-full-test-modes: "[]"
             caller-event-name: ${{ github.event_name }}
             windows-test: true
@@ -53,8 +53,8 @@ jobs:
             platforms: '["hyperlight","microvm"]'
             process-modes: '["multi-process","single-process","standalone"]'
             memory-sizes: '["128mb","256mb"]'
-            matrix-exclude: '[{"platform":"hyperlight"}]'
-            windows-matrix-exclude: '[{"platform":"hyperlight"}]'
+            matrix-exclude: '[{"platform":"hyperlight","process-mode":"multi-process"},{"platform":"hyperlight","process-mode":"single-process"}]'
+            windows-matrix-exclude: '[]'
             skip-full-test-modes: "[]"
             caller-event-name: "schedule"
             windows-test: true
