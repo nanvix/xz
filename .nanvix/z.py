@@ -77,6 +77,13 @@ class XzBuild(ZScript):
     """Build script for nanvix/xz."""
 
     # ------------------------------------------------------------------
+    # Docker hooks
+    # ------------------------------------------------------------------
+
+    def docker_image(self) -> str:  # noqa: D102
+        return "ghcr.io/nanvix/toolchain-gcc:sha-34a3641"
+
+    # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
@@ -249,7 +256,7 @@ class XzBuild(ZScript):
             env.update(overrides)
             # self.run() defaults to docker=True; when `./z setup --with-docker`
             # was used, the toolchain image persists and both ./configure and
-            # make below run inside the nanvix/toolchain container.  No host
+            # make below run inside the toolchain container.  No host
             # autotools or compiler is needed for the configure/build path.
             self.run(
                 "./configure",
