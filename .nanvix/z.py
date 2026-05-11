@@ -7,7 +7,7 @@ Usage:
     ./z setup     # Resolve toolchain + download sysroot, prepare upstream tree
     ./z build    # Cross-compile liblzma.a
     ./z test     # Three-tier smoke + integration + functional ladder
-    ./z release  # Stage sysroot/{lib,include} + emit dist/*.tar.bz2
+    ./z release  # Stage sysroot/{lib,include} + emit dist/*.tar.gz
     ./z clean    # Remove build artefacts
 """
 
@@ -249,8 +249,7 @@ class XzBuild(ZScript):
         if current != wanted:
             if current is not None:
                 log.info(
-                    "Configure inputs changed since last build; "
-                    "re-running ./configure."
+                    "Configure inputs changed since last build; re-running ./configure."
                 )
             env = dict(os.environ)
             env.update(overrides)
@@ -530,8 +529,7 @@ class XzBuild(ZScript):
                 magic = fh.read(4)
             if magic != b"\x7fELF":
                 log.fatal(
-                    f"integration: {elf.name} is not an ELF binary "
-                    f"(magic={magic!r})",
+                    f"integration: {elf.name} is not an ELF binary (magic={magic!r})",
                     code=EXIT_BUILD_FAILURE,
                 )
             try:
@@ -545,8 +543,7 @@ class XzBuild(ZScript):
                 file_out = ""
             if file_out and "statically" not in file_out:
                 log.info(
-                    f"  WARN: file(1) did not report 'statically linked' "
-                    f"for {elf.name}"
+                    f"  WARN: file(1) did not report 'statically linked' for {elf.name}"
                 )
             log.info(f"  OK: {elf.name} ({elf.stat().st_size} bytes, ELF)")
         log.info("  PASS: xz integration tests")
@@ -878,7 +875,7 @@ class XzBuild(ZScript):
             dist/xz-<plat>-<mode>-<mem>/sysroot/lib/pkgconfig/liblzma.pc
             dist/xz-<plat>-<mode>-<mem>/sysroot/include/lzma.h
             dist/xz-<plat>-<mode>-<mem>/sysroot/include/lzma/*.h
-            dist/xz-<plat>-<mode>-<mem>.tar.bz2
+            dist/xz-<plat>-<mode>-<mem>.tar.gz
 
         Then re-opens the tarball and asserts the four expected paths
         are present (acceptance criterion #4).  Pure-Python tarfile is
@@ -939,13 +936,13 @@ class XzBuild(ZScript):
             shutil.rmtree(lzma_subdir_dst)
         shutil.copytree(lzma_subdir_src, lzma_subdir_dst)
 
-        # Build the bzip2-compressed tarball; arcname strips the
+        # Build the gzip-compressed tarball; arcname strips the
         # staging dir prefix so paths inside the archive begin at
         # ``sysroot/``.
-        tarball = dist_dir / f"{artifact}.tar.bz2"
+        tarball = dist_dir / f"{artifact}.tar.gz"
         if tarball.exists():
             tarball.unlink()
-        with tarfile.open(tarball, "w:bz2") as tf:
+        with tarfile.open(tarball, "w:gz") as tf:
             tf.add(sysroot, arcname="sysroot")
         log.info(f"Wrote release tarball: {tarball}")
 
@@ -965,7 +962,7 @@ class XzBuild(ZScript):
         }
         # The header subdirectory is enforced by membership: at least
         # one entry beneath sysroot/include/lzma/ must be present.
-        with tarfile.open(tarball, "r:bz2") as tf:
+        with tarfile.open(tarball, "r:gz") as tf:
             members = tf.getnames()
         present = set(members)
         missing = sorted(required - present)
