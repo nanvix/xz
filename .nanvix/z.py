@@ -552,10 +552,10 @@ class XzBuild(ZScript):
         """Run every upstream check_PROGRAMS test under nanvixd.elf.
 
         Filters out names listed in :data:`_UPSTREAM_TEST_SKIPLIST`
-        (logs one ``SKIP`` line per filtered entry) and hands the
-        remainder to :meth:`_run_elfs_under_nanvixd`.  The runner's
-        77-handling stays in place as defence in depth in case a
-        non-skiplisted test starts emitting SKIP deliberately.
+        (logs one ``SKIP`` line per filtered entry) and runs the
+        remainder.  In standalone mode, uses ``make_initrd`` to bundle
+        each test binary with system daemons; in multi-process and
+        single-process modes, invokes nanvixd directly with the ELF.
         """
         log.info("=== xz functional tests ===")
         all_elfs = self._build_upstream_tests()
@@ -566,36 +566,99 @@ class XzBuild(ZScript):
                 log.info(f"  SKIP: {elf.stem} ({reason})")
             else:
                 elfs.append(elf)
-        # Spike 2026-05-04: total ramfs payload across the six ELFs
-        # measures ~7.2 MiB (well under the 32 MiB default microvm
-        # heap), and a single nanvixd.elf boot per ELF against one
-        # shared ramfs image runs each test cleanly to PASS.  Both
-        # gates (a) (mkramfs accepts sibling ELFs) and (c) (every
-        # test exits 0 from a shared ramfs) passed, so single_ramfs
-        # is True; flip to False if either regresses.
-        self._run_elfs_under_nanvixd(elfs, single_ramfs=True)
+        if self.config.deployment_mode == "standalone":
+            self._run_functional_standalone(elfs)
+        else:
+            self._run_functional_non_standalone(elfs)
         log.info("  PASS: xz functional tests")
 
-    def _run_elfs_under_nanvixd(self, elfs: list[Path], *, single_ramfs: bool) -> None:
-        """Run a list of ELFs under nanvixd.elf and score by exit code.
+    def _run_functional_standalone(self, elfs: list[Path]) -> None:
+        """Run standalone functional tests using make_initrd.
 
-        Per automake convention (``tests/tests.h``): exit 0 = PASS,
-        exit 77 = SKIP, anything else = FAIL.  The tier passes iff
-        every ELF returned 0 or 77 *and* every 77-exit ELF name appears
-        in :data:`_UPSTREAM_TEST_SKIPLIST` (an unexpected SKIP fails
-        the tier so a silently broken build cannot mask itself by
-        always returning 77).  Captured stdout/stderr is printed on
-        FAIL only.
+        Creates an initrd bundling each test ELF with system daemons
+        via make_initrd, and a ramfs providing /tmp for any test I/O.
+        The ELF is temporarily copied to the repo root because
+        make_initrd resolves binary paths relative to it.
+        """
+        sysroot = self._sysroot_path()
+        mkramfs = sysroot / "bin" / "mkramfs.elf"
+        nanvixd = sysroot / "bin" / "nanvixd.elf"
+        for tool in (mkramfs, nanvixd):
+            if not tool.is_file():
+                log.fatal(
+                    f"functional: {tool} not present",
+                    code=EXIT_MISSING_DEP,
+                    hint="Re-run `./z setup` to refresh the sysroot.",
+                )
 
-        ``single_ramfs=True``  → one ramfs containing every ELF, one
-            ``nanvixd.elf`` invocation per ELF.
-        ``single_ramfs=False`` → one fresh ramfs per ELF (fall-back if
-            ``mkramfs`` ever refuses sibling ELFs).
+        failures: list[str] = []
 
-        The host-absolute path passed after ``--`` is load-bearing:
-        ``nanvixd.elf`` ``mmap()``s the user binary from the host
-        filesystem, not from the ramfs (the ramfs only carries
-        auxiliary state like ``/tmp``).
+        for elf in elfs:
+            name = elf.stem
+            log.info(f"  Running {name}...")
+            # make_initrd resolves binaries relative to repo_root;
+            # copy the ELF there temporarily unless it already lives there.
+            repo_elf = self.repo_root / elf.name
+            copied_elf = False
+            initrd: Path | None = None
+            try:
+                if elf.resolve() != repo_elf.resolve():
+                    if repo_elf.exists():
+                        raise FileExistsError(
+                            f"refusing to clobber existing {repo_elf}"
+                        )
+                    shutil.copy2(elf, repo_elf)
+                    copied_elf = True
+                initrd = self.make_initrd(elf.name)
+                with tempfile.TemporaryDirectory(prefix=f"xz_test_{name}_") as tmp:
+                    tmp_path = Path(tmp)
+                    ramfs_dir = tmp_path / "ramfs"
+                    ramfs_dir.mkdir()
+                    (ramfs_dir / "tmp").mkdir()
+                    ramfs_img = tmp_path / "rootfs.img"
+
+                    self.run(
+                        str(mkramfs),
+                        "-o",
+                        str(ramfs_img),
+                        str(ramfs_dir),
+                        docker=False,
+                        timeout=60,
+                    )
+
+                    self.run(
+                        str(sysroot / "bin" / "nanvixd.elf"),
+                        "-bin-dir",
+                        str(sysroot / "bin"),
+                        "-ramfs",
+                        str(ramfs_img),
+                        "--",
+                        str(initrd),
+                        docker=False,
+                        timeout=180,
+                    )
+                log.info(f"  PASS: {name}")
+            except SystemExit:
+                log.info(f"  FAIL: {name}")
+                failures.append(name)
+            finally:
+                if initrd is not None and initrd.exists():
+                    initrd.unlink()
+                if copied_elf and repo_elf.exists():
+                    repo_elf.unlink()
+
+        if failures:
+            log.fatal(
+                "functional: FAIL: " + ", ".join(failures),
+                code=EXIT_BUILD_FAILURE,
+            )
+
+    def _run_functional_non_standalone(self, elfs: list[Path]) -> None:
+        """Run functional tests in multi-process or single-process mode.
+
+        Uses nanvixd.elf directly with a ramfs providing /tmp for any
+        test I/O.  No initrd is needed as daemons are managed by the
+        hypervisor in these modes.
         """
         sysroot = self._sysroot_path()
         nanvixd = sysroot / "bin" / "nanvixd.elf"
@@ -608,87 +671,47 @@ class XzBuild(ZScript):
                     hint="Re-run `./z setup` to refresh the sysroot.",
                 )
 
-        failures: list[tuple[str, int]] = []
-        unexpected_skips: list[str] = []
+        failures: list[str] = []
 
-        def _run_one(elf: Path, ramfs_img: Path) -> None:
-            cmd = [
-                str(nanvixd),
-                "-bin-dir",
-                str(sysroot / "bin"),
-                "-ramfs",
-                str(ramfs_img),
-                "--",
-                str(elf.resolve()),
-            ]
-            log.info(f"$ {' '.join(cmd)}")
-            result = subprocess.run(
-                cmd,
-                timeout=180,
-                capture_output=True,
-                text=True,
-            )
-            rc = result.returncode
+        for elf in elfs:
             name = elf.stem
-            if rc == 0:
-                log.info(f"  PASS: {name}")
-            elif rc == 77:
-                if name in _UPSTREAM_TEST_SKIPLIST:
-                    log.info(f"  SKIP: {name} ({_UPSTREAM_TEST_SKIPLIST[name]})")
-                else:
-                    log.info(f"  SKIP (unexpected): {name}")
-                    unexpected_skips.append(name)
-            else:
-                sys.stdout.write(result.stdout)
-                sys.stderr.write(result.stderr)
-                log.info(f"  FAIL: {name} (exit {rc})")
-                failures.append((name, rc))
-
-        if single_ramfs:
-            with tempfile.TemporaryDirectory(prefix="xz_tests_") as tmp:
-                tmp_path = Path(tmp)
-                ramfs_dir = tmp_path / "ramfs"
-                ramfs_dir.mkdir()
-                (ramfs_dir / "tmp").mkdir()
-                for elf in elfs:
-                    shutil.copy2(elf, ramfs_dir / elf.name)
-                ramfs_img = tmp_path / "rootfs.img"
-                subprocess.run(
-                    [str(mkramfs), "-o", str(ramfs_img), str(ramfs_dir)],
-                    check=True,
-                    timeout=60,
-                )
-                for elf in elfs:
-                    _run_one(elf, ramfs_img)
-        else:
-            for elf in elfs:
-                with tempfile.TemporaryDirectory(prefix=f"xz_test_{elf.stem}_") as tmp:
+            log.info(f"  Running {name}...")
+            try:
+                with tempfile.TemporaryDirectory(prefix=f"xz_test_{name}_") as tmp:
                     tmp_path = Path(tmp)
                     ramfs_dir = tmp_path / "ramfs"
                     ramfs_dir.mkdir()
                     (ramfs_dir / "tmp").mkdir()
-                    shutil.copy2(elf, ramfs_dir / elf.name)
                     ramfs_img = tmp_path / "rootfs.img"
-                    subprocess.run(
-                        [str(mkramfs), "-o", str(ramfs_img), str(ramfs_dir)],
-                        check=True,
+
+                    self.run(
+                        str(mkramfs),
+                        "-o",
+                        str(ramfs_img),
+                        str(ramfs_dir),
+                        docker=False,
                         timeout=60,
                     )
-                    _run_one(elf, ramfs_img)
 
-        if failures or unexpected_skips:
-            details: list[str] = []
-            if failures:
-                details.append(
-                    "FAIL: " + ", ".join(f"{n} (exit {rc})" for n, rc in failures)
-                )
-            if unexpected_skips:
-                details.append(
-                    "unexpected SKIP (not in _UPSTREAM_TEST_SKIPLIST): "
-                    + ", ".join(unexpected_skips)
-                )
+                    self.run(
+                        str(nanvixd),
+                        "-bin-dir",
+                        str(sysroot / "bin"),
+                        "-ramfs",
+                        str(ramfs_img),
+                        "--",
+                        str(elf.resolve()),
+                        docker=False,
+                        timeout=180,
+                    )
+                log.info(f"  PASS: {name}")
+            except SystemExit:
+                log.info(f"  FAIL: {name}")
+                failures.append(name)
+
+        if failures:
             log.fatal(
-                "functional: " + "; ".join(details),
+                "functional: FAIL: " + ", ".join(failures),
                 code=EXIT_BUILD_FAILURE,
             )
 
@@ -696,9 +719,9 @@ class XzBuild(ZScript):
         """Run upstream check_PROGRAMS natively on Windows via nanvixd.exe.
 
         Only standalone mode is exercised on Windows; multi-process
-        and single-process require linuxd which is Linux-only.  The
-        binary discovery allowlist is restricted to the six upstream
-        ``test_*.elf`` so spurious ELFs in the tree are not booted.
+        and single-process require linuxd which is Linux-only.  Uses
+        make_initrd to bundle each test binary with system daemons,
+        and a ramfs providing /tmp for any test I/O.
         """
         if self.config.deployment_mode != "standalone":
             print(
@@ -729,19 +752,6 @@ class XzBuild(ZScript):
                 code=EXIT_MISSING_DEP,
                 hint="Run `./z setup` first.",
             )
-
-        # On Windows we are a pure consumer of the Linux build job's artefact
-        # transfer (`actions/upload-artifact: '**/*.elf'` in the reusable
-        # workflow's build step).  liblzma.a, lzma.h, and liblzma.pc are not
-        # transferred -- only ELFs are -- and the cross-toolchain isn't
-        # installed on Windows runners.  The smoke and integration tiers
-        # validate the *build environment* (artefact presence + sizes,
-        # ELF-magic sniff of every test_*.elf) and already ran on the
-        # Linux build job before the artefact was uploaded.  Re-running
-        # them here would only fail spuriously.  Mirror nanvix/zlib
-        # (`example.elf`) and nanvix/sqlite (`sqlite3.elf`): discover the
-        # pre-built upstream tests via the allowlist and run the
-        # functional tier (boot under nanvixd.exe, score by exit code).
 
         test_allowlist = {f"{n}.elf" for n in _UPSTREAM_TEST_NAMES}
         # Iterate the full allowlist minus anything in the skiplist;
@@ -775,91 +785,65 @@ class XzBuild(ZScript):
             )
 
         failed: list[str] = []
-        unexpected_skips: list[str] = []
         for binary in candidates:
             name = binary.stem
             print(f"RUN  {name}...")
-            with tempfile.TemporaryDirectory(
-                prefix=f"nanvix_{name}_",
-                ignore_cleanup_errors=True,
-            ) as tmpdir:
-                tmpdir_path = Path(tmpdir)
-                ramfs_dir = tmpdir_path / "ramfs"
-                ramfs_dir.mkdir()
-                (ramfs_dir / "tmp").mkdir(exist_ok=True)
-                shutil.copy2(binary, ramfs_dir / binary.name)
-                ramfs_img = tmpdir_path / f"rootfs_{name}.img"
-                try:
-                    subprocess.run(
-                        [str(mkramfs.resolve()), "-o", str(ramfs_img), str(ramfs_dir)],
-                        check=True,
+            # make_initrd resolves binaries relative to repo_root;
+            # copy the ELF there temporarily unless it already lives there.
+            repo_elf = self.repo_root / binary.name
+            copied_elf = False
+            initrd: Path | None = None
+            try:
+                if binary.resolve() != repo_elf.resolve():
+                    if repo_elf.exists():
+                        raise FileExistsError(
+                            f"refusing to clobber existing {repo_elf}"
+                        )
+                    shutil.copy2(binary, repo_elf)
+                    copied_elf = True
+                initrd = self.make_initrd(binary.name)
+                with tempfile.TemporaryDirectory(
+                    prefix=f"nanvix_{name}_",
+                    ignore_cleanup_errors=True,
+                ) as tmpdir:
+                    tmpdir_path = Path(tmpdir)
+                    ramfs_dir = tmpdir_path / "ramfs"
+                    ramfs_dir.mkdir()
+                    (ramfs_dir / "tmp").mkdir(exist_ok=True)
+                    ramfs_img = tmpdir_path / f"rootfs_{name}.img"
+
+                    self.run(
+                        str(mkramfs),
+                        "-o",
+                        str(ramfs_img),
+                        str(ramfs_dir),
+                        docker=False,
                         timeout=60,
                     )
-                except subprocess.CalledProcessError as e:
-                    print(f"FAIL {name} (mkramfs exit code {e.returncode})")
-                    failed.append(name)
-                    continue
-                except subprocess.TimeoutExpired:
-                    print(f"FAIL {name} (mkramfs timeout)")
-                    failed.append(name)
-                    continue
-                try:
-                    result = subprocess.run(
-                        [
-                            str(nanvixd.resolve()),
-                            "-bin-dir",
-                            str((sysroot_path / "bin").resolve()),
-                            "-ramfs",
-                            str(ramfs_img),
-                            # Pass the absolute host path (matches
-                            # nanvix/sqlite's working Windows pattern).
-                            # Earlier versions used the in-ramfs relative
-                            # path (zlib's pattern) but that caused
-                            # nanvixd.exe to exit 255 right after boot,
-                            # while sqlite's host-path form works on the
-                            # same Windows runner.
-                            "--",
-                            str(binary.resolve()),
-                        ],
-                        stdin=subprocess.DEVNULL,
+
+                    self.run(
+                        str(nanvixd),
+                        "-bin-dir",
+                        str(sysroot_path / "bin"),
+                        "-ramfs",
+                        str(ramfs_img),
+                        "--",
+                        str(initrd),
+                        docker=False,
                         timeout=180,
                     )
-                    # Inherit stdout/stderr (matches nanvix/zlib +
-                    # nanvix/sqlite). Capturing via anonymous pipes makes
-                    # nanvixd.exe abort with exit 255 on Windows before the
-                    # guest kernel boots, because its "interactive mode"
-                    # console wiring requires real Windows console handles.
-                    # Upstream tests/tests.h emits exit 0 on PASS, 77 on
-                    # SKIP, and any other non-zero on FAIL; mirror the
-                    # Linux helper's _UPSTREAM_TEST_SKIPLIST handling so
-                    # both runners apply the same automake convention.
-                    rc = result.returncode
-                    if rc == 0:
-                        print(f"OK   {name}")
-                    elif rc == 77:
-                        if name in _UPSTREAM_TEST_SKIPLIST:
-                            reason = _UPSTREAM_TEST_SKIPLIST[name]
-                            print(f"SKIP {name} ({reason})")
-                        else:
-                            print(f"SKIP {name} (unexpected)")
-                            unexpected_skips.append(name)
-                    else:
-                        print(f"FAIL {name} (exit code {rc})")
-                        failed.append(name)
-                except subprocess.TimeoutExpired:
-                    print(f"FAIL {name} (timeout)")
-                    failed.append(name)
+                print(f"OK   {name}")
+            except SystemExit:
+                print(f"FAIL {name}")
+                failed.append(name)
+            finally:
+                if initrd is not None and initrd.exists():
+                    initrd.unlink()
+                if copied_elf and repo_elf.exists():
+                    repo_elf.unlink()
 
-        if failed or unexpected_skips:
-            details: list[str] = []
-            if failed:
-                details.append(f"{len(failed)} failed: {' '.join(failed)}")
-            if unexpected_skips:
-                details.append(
-                    "unexpected SKIP (not in _UPSTREAM_TEST_SKIPLIST): "
-                    + " ".join(unexpected_skips)
-                )
-            raise RuntimeError("; ".join(details))
+        if failed:
+            raise RuntimeError(f"{len(failed)} failed: {' '.join(failed)}")
         print(f"\t\t*** All {len(candidates)} tests PASSED ***")
 
     # ------------------------------------------------------------------
