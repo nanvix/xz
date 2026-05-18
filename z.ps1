@@ -15,7 +15,7 @@ $zutilVersion = if ($env:NANVIX_ZUTIL_VERSION) {
     $env:NANVIX_ZUTIL_VERSION
 }
 else {
-    "0.9.0"
+    "0.9.1"
 }
 $zutilVersion = $zutilVersion -replace "^v", ""
 
