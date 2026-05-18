@@ -59,12 +59,12 @@ elif [ -x "$VENV_BIN" ]; then
     VENV_VERSION="$("$VENV_BIN" --version 2>/dev/null || true)"
     if [ "$VENV_VERSION" != "nanvix-zutil ${ZUTIL_VERSION}" ]; then
         echo "Warning: venv nanvix-zutil version mismatch. Expected ${ZUTIL_VERSION}, found ${VENV_VERSION}. Re-bootstrapping..." >&2
-        bootstrap "version mismatch (expected ${ZUTIL_VERSION}, found ${VENV_VERSION})"
+        bootstrap
     fi
     BIN="$VENV_BIN"
 elif [ -d "$VENV" ] && ! command -v nanvix-zutil &>/dev/null; then
     echo "Warning: incomplete venv detected (binary missing). Re-running bootstrap..." >&2
-    bootstrap "incomplete venv (binary missing)"
+    bootstrap
     BIN="$VENV_BIN"
 else
     BIN="nanvix-zutil"

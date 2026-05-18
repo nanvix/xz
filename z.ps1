@@ -97,7 +97,7 @@ elseif (Test-Path $venvZutil) {
     }
     if ($venvVersion -ne "nanvix-zutil ${zutilVersion}") {
         Write-Warning "Venv nanvix-zutil version mismatch. Expected ${zutilVersion}, found ${venvVersion}. Re-bootstrapping..."
-        Bootstrap "version mismatch (expected ${zutilVersion}, found ${venvVersion})"
+        Bootstrap
         if (-not (Test-Path $venvZutil)) {
             throw "Bootstrap completed but $venvZutil not found."
         }
@@ -106,7 +106,7 @@ elseif (Test-Path $venvZutil) {
 }
 elseif ((Test-Path $venvDir) -and (-not $zutilGlobalVersion)) {
     Write-Warning "Incomplete venv detected (binary missing). Re-running bootstrap..."
-    Bootstrap "incomplete venv (binary missing)"
+    Bootstrap
     if (-not (Test-Path $venvZutil)) {
         throw "Bootstrap completed but $venvZutil not found."
     }
