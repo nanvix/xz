@@ -23,7 +23,7 @@ from pathlib import Path
 
 from nanvix_zutil import (
     CFG_SYSROOT,
-    CFG_TOOLCHAIN,
+    TOOLCHAIN_CONTAINER_PATH,
     EXIT_BUILD_FAILURE,
     EXIT_MISSING_DEP,
     ZScript,
@@ -46,9 +46,6 @@ _CONFIGURED_MARKER = ".nanvix-configured"
 # stages the install image before we copy the curated subset into build/.
 _INSTALL_STAGE_REL = Path("build") / "_install"
 
-# Default toolchain prefix when CFG_TOOLCHAIN is not set.  Matches the
-# default used by nanvix-zutil's docker layer and by sibling ports.
-_DEFAULT_TOOLCHAIN = "/opt/nanvix"
 
 # Upstream tests/check_PROGRAMS list (tests/Makefile.am:39-46).  The order
 # matches the upstream Makefile so iteration is stable and the names are
@@ -89,9 +86,7 @@ class XzBuild(ZScript):
 
     def _toolchain_path(self) -> Path:
         """Return the resolved cross-toolchain prefix."""
-        return Path(
-            self.config.get(CFG_TOOLCHAIN, _DEFAULT_TOOLCHAIN) or _DEFAULT_TOOLCHAIN
-        )
+        return Path(str(TOOLCHAIN_CONTAINER_PATH))
 
     def _sysroot_path(self) -> Path:
         """Return the resolved Nanvix sysroot, or fail loudly."""
@@ -122,7 +117,7 @@ class XzBuild(ZScript):
         # C compiler probe fails inside the container with "cannot create
         # executables" because it is told to link against host paths that
         # do not exist in the container's filesystem.
-        toolchain = self.translate_path(self._toolchain_path())
+        toolchain = str(TOOLCHAIN_CONTAINER_PATH)
         sysroot = self.translate_path(self._sysroot_path())
         bin_ = f"{toolchain}/bin"
         return {
