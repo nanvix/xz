@@ -248,15 +248,15 @@ class XzBuild(ZScript):
                 )
             env = dict(os.environ)
             env.update(overrides)
-            # self.run() defaults to docker=True; when `./z setup --with-docker`
-            # was used, the toolchain image persists and both ./configure and
-            # make below run inside the toolchain container.  No host
-            # autotools or compiler is needed for the configure/build path.
+            # ./configure and make both invoke the cross-toolchain, so
+            # they must run inside the docker-wrapped build context
+            # established by `./z setup --with-docker`.
             self.run(
                 "./configure",
                 *opts,
                 cwd=self.repo_root,
                 env=env,
+                docker=True,
             )
             marker.write_text(wanted)
 
@@ -265,7 +265,7 @@ class XzBuild(ZScript):
             nproc = str(os.cpu_count() or 1)
         except Exception:
             nproc = "1"
-        self.run("make", f"-j{nproc}", cwd=self.repo_root)
+        self.run("make", f"-j{nproc}", cwd=self.repo_root, docker=True)
 
         # Stage a curated install image and copy the subset we ship into
         # build/ at the layout the schema/release path expects.
@@ -296,6 +296,7 @@ class XzBuild(ZScript):
             "install",
             f"DESTDIR={self.translate_path(stage)}",
             cwd=repo,
+            docker=True,
         )
 
         # The configure --prefix=/sysroot lands files under
@@ -339,6 +340,34 @@ class XzBuild(ZScript):
 
         log.info(f"Staged artefacts under {build_dir}")
 
+    def _expected_test_paths(self) -> list[Path]:
+        """Return the expected ``build/tests/<name>.elf`` paths.
+
+        Pure path computation -- does not touch the filesystem and
+        does not invoke any subprocess.  Used by both the build-time
+        cross-compile and the host-side test tiers to agree on where
+        the upstream test ELFs live.
+        """
+        dest_dir = self.repo_root / "build" / "tests"
+        return [dest_dir / f"{name}.elf" for name in _UPSTREAM_TEST_NAMES]
+
+    def _locate_upstream_tests(self) -> list[Path]:
+        """Return the cached upstream test ELFs (host-side; no docker).
+
+        Asserts every expected ELF exists; if any are missing, fails
+        with a hint to run ``./z build`` first.  Used
+        by the test tiers, which must never reach the cross-toolchain.
+        """
+        dests = self._expected_test_paths()
+        missing = [d for d in dests if not d.is_file()]
+        if missing:
+            log.fatal(
+                "upstream test ELFs missing: " + ", ".join(str(d) for d in missing),
+                code=EXIT_BUILD_FAILURE,
+                hint="Run `./z build` first.",
+            )
+        return dests
+
     def _build_upstream_tests(self) -> list[Path]:
         """Cross-compile upstream tests/check_PROGRAMS into build/tests/.
 
@@ -351,6 +380,9 @@ class XzBuild(ZScript):
         Idempotent: if every destination ELF is newer than its source
         ``tests/<name>.c`` and ``build/liblzma.a``, the rebuild is
         skipped and the existing destinations are returned.
+
+        Only safe to call from :meth:`build` (cross-compile context).
+        Test tiers must use :meth:`_locate_upstream_tests` instead.
         """
         repo = self.repo_root
         build_dir = repo / "build"
@@ -361,9 +393,9 @@ class XzBuild(ZScript):
                 code=EXIT_BUILD_FAILURE,
             )
 
+        dests = self._expected_test_paths()
         dest_dir = build_dir / "tests"
         dest_dir.mkdir(parents=True, exist_ok=True)
-        dests = [dest_dir / f"{name}.elf" for name in _UPSTREAM_TEST_NAMES]
         srcs = [repo / "tests" / f"{name}.c" for name in _UPSTREAM_TEST_NAMES]
 
         inputs_mtime = max(
@@ -419,6 +451,7 @@ class XzBuild(ZScript):
             f"-j{nproc}",
             cwd=repo,
             env=env,
+            docker=True,
         )
 
         # libtool drops the unwrapped ELF under tests/.libs/<name>; in
@@ -507,7 +540,7 @@ class XzBuild(ZScript):
     def _test_integration(self) -> None:
         """Confirm every upstream test binary is a static ELF."""
         log.info("=== xz integration tests ===")
-        elfs = self._build_upstream_tests()
+        elfs = self._locate_upstream_tests()
         # Verify ELF format via magic bytes -- the source of truth
         # and dependency-free.  file(1), if present, is queried only
         # for the human-readable 'statically linked' confirmation; its
@@ -553,7 +586,7 @@ class XzBuild(ZScript):
         single-process modes, invokes nanvixd directly with the ELF.
         """
         log.info("=== xz functional tests ===")
-        all_elfs = self._build_upstream_tests()
+        all_elfs = self._locate_upstream_tests()
         elfs: list[Path] = []
         for elf in all_elfs:
             reason = _UPSTREAM_TEST_SKIPLIST.get(elf.stem)
