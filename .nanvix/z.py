@@ -14,6 +14,7 @@ Usage:
 from __future__ import annotations
 
 import os
+import shlex
 import shutil
 import subprocess
 import sys
@@ -236,74 +237,126 @@ class XzBuild(ZScript):
         return result
 
     def build(self) -> None:
-        """Cross-compile liblzma.a via the upstream autotools."""
-        # Configure once per distinct configure-input set.  If the
-        # sysroot, toolchain, or configure flags have changed since the
-        # last successful ./configure (e.g. a re-./z setup resolved a
-        # different sysroot), the marker contents will mismatch and we
-        # re-run ./configure to avoid linking against stale Makefiles.
-        marker = self.repo_root / _CONFIGURED_MARKER
+        """Cross-compile liblzma.a via the upstream autotools.
+
+        Runs the entire autotools sequence (./configure -> make -> make
+        install -> tests/check_PROGRAMS) inside a single ``docker run``
+        invocation.  This is required for correctness under zutil's
+        Windows tar-copy docker mode, where the workspace is staged
+        into an ephemeral ``/tmp/build`` for each container start --
+        splitting the sequence across multiple ``run()`` calls would
+        lose ./configure's outputs (Makefile, config.h, libtool, ...)
+        before ``make`` ever sees them.  Final artefacts persist
+        because ``make install DESTDIR=...`` and the test-ELF copy-back
+        write through the bind-mounted workspace.
+        """
+        repo = self.repo_root
         opts = self._configure_opts()
         overrides = self._configure_env_overrides()
-        wanted = self._configured_marker_contents(opts, overrides)
-        current = marker.read_text() if marker.exists() else None
-        if current != wanted:
-            if current is not None:
-                log.info(
-                    "Configure inputs changed since last build; re-running ./configure."
-                )
-            env = dict(os.environ)
-            env.update(overrides)
-            # ./configure and make both invoke the cross-toolchain, so
-            # they must run inside the docker-wrapped build context
-            # established by `./z setup --with-docker`.
-            run(
-                "./configure",
-                *opts,
-                cwd=self.repo_root,
-                env=env,
-                docker=self.docker,
-            )
-            marker.write_text(wanted)
 
-        # Build.
         try:
             nproc = str(os.cpu_count() or 1)
         except Exception:
             nproc = "1"
-        run("make", f"-j{nproc}", cwd=self.repo_root, docker=self.docker)
 
-        # Stage a curated install image and copy the subset we ship into
-        # build/ at the layout the schema/release path expects.
+        # Stage path translated for the container: make install writes
+        # through the workspace mount so build/_install/ lands on the
+        # host filesystem regardless of docker copy mode.
+        stage_host = repo / _INSTALL_STAGE_REL
+        if stage_host.exists():
+            shutil.rmtree(stage_host)
+        stage_host.mkdir(parents=True)
+        stage_container = (
+            self.docker.translate_path(stage_host) if self.docker else stage_host
+        )
+
+        # Test-ELF destination directory, likewise translated.
+        tests_dest_host = repo / "build" / "tests"
+        tests_dest_host.mkdir(parents=True, exist_ok=True)
+        tests_dest_container = (
+            self.docker.translate_path(tests_dest_host)
+            if self.docker
+            else tests_dest_host
+        )
+
+        # See _build_upstream_tests' historical comment block: drop the
+        # link group from LDFLAGS at make-time for the tests target and
+        # carry it via LIBS so libtool preserves positional ordering.
+        sysroot = (
+            self.docker.translate_path(self._sysroot_path())
+            if self.docker
+            else self._sysroot_path()
+        )
+        tests_ldflags = f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib"
+        tests_libs = "-Wl,--start-group,-lposix,-lc,-lm,--end-group"
+
+        configure_cmd = " ".join(["./configure", *(shlex.quote(o) for o in opts)])
+        tests_targets = " ".join(_UPSTREAM_TEST_NAMES)
+
+        # Single shell script: configure -> make -> install ->
+        # tests-build -> copy test ELFs out to the mounted workspace.
+        script = "\n".join(
+            [
+                "set -e",
+                configure_cmd,
+                f"make -j{nproc}",
+                f"make install DESTDIR={shlex.quote(str(stage_container))}",
+                (
+                    "make -C tests "
+                    f"LDFLAGS={shlex.quote(tests_ldflags)} "
+                    f"LIBS={shlex.quote(tests_libs)} "
+                    f"{tests_targets} -j{nproc}"
+                ),
+                f"mkdir -p {shlex.quote(str(tests_dest_container))}",
+                # libtool drops the unwrapped ELF under tests/.libs/<name>;
+                # in the rare case it inlines the binary directly into
+                # tests/<name> (no shared-library wrapper needed) fall
+                # back to the flat path.
+                "for name in " + tests_targets + "; do",
+                "  src=tests/.libs/$name",
+                '  [ -f "$src" ] || src=tests/$name',
+                '  if [ ! -f "$src" ]; then',
+                '    echo "upstream test binary missing: $name" >&2',
+                "    exit 1",
+                "  fi",
+                f'  cp -f "$src" {shlex.quote(str(tests_dest_container))}/$name.elf',
+                "done",
+            ]
+        )
+
+        env = dict(os.environ)
+        env.update(overrides)
+        run(
+            "sh",
+            "-c",
+            script,
+            cwd=repo,
+            env=env,
+            docker=self.docker,
+        )
+
+        # Refresh the marker now that configure/make/install all
+        # succeeded in lockstep.  Kept for diagnostic value (`cat
+        # .nanvix-configured` shows the configure inputs of the last
+        # successful build); no longer gates re-execution.
+        marker = repo / _CONFIGURED_MARKER
+        marker.write_text(self._configured_marker_contents(opts, overrides))
+
+        # Host-only: shuffle the install image into the layout the
+        # release/packaging step expects under build/.
         self._stage_artefacts()
-        # Cross-compile upstream's tests/check_PROGRAMS now, while we
-        # are inside the docker-wrapped build context.  ``nanvix-zutil
-        # test`` is deliberately host-only (script.py:730 — "test and
-        # benchmark run on the host"), so the cross-compiler is
-        # unreachable from the test step in CI when --with-docker was
-        # used during setup.  By producing build/tests/test_*.elf here,
-        # the test tiers below only need to *execute* the pre-built
-        # artefacts on the host (via nanvixd.elf, which is a Linux host
-        # binary in the sysroot).
-        self._build_upstream_tests()
 
     def _stage_artefacts(self) -> None:
-        """Install into build/_install and copy outputs into build/."""
+        """Copy install image outputs from build/_install into build/.
+
+        Host-only: ``make install DESTDIR=<build/_install>`` is driven
+        from :meth:`build` as part of the single docker invocation, so
+        by the time we get here ``build/_install/sysroot/`` already
+        exists on the host filesystem (written through the bind mount).
+        """
         repo = self.repo_root
         build_dir = repo / "build"
         stage = repo / _INSTALL_STAGE_REL
-
-        if stage.exists():
-            shutil.rmtree(stage)
-        stage.mkdir(parents=True)
-
-        run(
-            "make",
-            "install",
-            f"DESTDIR={(self.docker.translate_path(stage) if self.docker else stage)}",
-            cwd=repo,
-            docker=self.docker,
-        )
 
         # The configure --prefix=/sysroot lands files under
         # <stage>/sysroot/{lib,bin,include}/...  Copy out into build/.
@@ -372,113 +425,6 @@ class XzBuild(ZScript):
                 code=EXIT_BUILD_FAILURE,
                 hint="Run `./z build` first.",
             )
-        return dests
-
-    def _build_upstream_tests(self) -> list[Path]:
-        """Cross-compile upstream tests/check_PROGRAMS into build/tests/.
-
-        Drives ``make -C tests check_PROGRAMS`` inside the same
-        docker-wrapped build context as :meth:`build`, then copies the
-        libtool-unwrapped ELFs into ``build/tests/test_*.elf`` and
-        returns their paths in the order declared by upstream's
-        ``tests/Makefile.am``.
-
-        Idempotent: if every destination ELF is newer than its source
-        ``tests/<name>.c`` and ``build/liblzma.a``, the rebuild is
-        skipped and the existing destinations are returned.
-
-        Only safe to call from :meth:`build` (cross-compile context).
-        Test tiers must use :meth:`_locate_upstream_tests` instead.
-        """
-        repo = self.repo_root
-        build_dir = repo / "build"
-        liblzma = build_dir / "liblzma.a"
-        if not liblzma.is_file():
-            log.fatal(
-                f"liblzma.a missing at {liblzma}; run `./z build` first.",
-                code=EXIT_BUILD_FAILURE,
-            )
-
-        dests = self._expected_test_paths()
-        dest_dir = build_dir / "tests"
-        dest_dir.mkdir(parents=True, exist_ok=True)
-        srcs = [repo / "tests" / f"{name}.c" for name in _UPSTREAM_TEST_NAMES]
-
-        inputs_mtime = max(
-            liblzma.stat().st_mtime,
-            *(s.stat().st_mtime for s in srcs if s.exists()),
-        )
-        if all(d.is_file() and d.stat().st_mtime >= inputs_mtime for d in dests):
-            return dests
-
-        # Build the env on top of the canonical configure overrides so
-        # CC/AR/etc. all point at the cross toolchain.  We additionally
-        # need to override LDFLAGS+LIBS for the make-time link of the
-        # check_PROGRAMS targets, but make will not honour env-set
-        # values for variables that the generated Makefile assigns
-        # unconditionally (LDFLAGS and LIBS are baked in at configure
-        # time).  We therefore pass the override on the make command
-        # line below, where it wins over the Makefile assignment.
-        #
-        # The override itself: libtool reorders anything in LDFLAGS
-        # ahead of LDADD when composing the final link line for the
-        # check_PROGRAMS targets, which would split the
-        # --start-group/--end-group group across liblzma.la and break
-        # cyclic resolution between liblzma/libposix/libc/libm.  We
-        # therefore drop the link group from LDFLAGS and carry it in
-        # LIBS as a single comma-joined -Wl, token, which libtool
-        # preserves positionally (it appears after the convenience
-        # library at link time).  The configure-time LIBS="" invariant
-        # in _configure_env_overrides is unaffected — that recipe is
-        # only consumed by ./configure, never by make.
-        sysroot = (
-            self.docker.translate_path(self._sysroot_path())
-            if self.docker
-            else self._sysroot_path()
-        )
-        env = dict(os.environ)
-        env.update(self._configure_env_overrides())
-        ldflags_override = f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib"
-        libs_override = "-Wl,--start-group,-lposix,-lc,-lm,--end-group"
-
-        try:
-            nproc = str(os.cpu_count() or 1)
-        except Exception:
-            nproc = "1"
-
-        log.info("Building upstream tests/check_PROGRAMS")
-        # ``check_PROGRAMS`` is a Make variable, not a target.  Pass the
-        # individual binary names as explicit targets so we build them
-        # without running them (``make check`` would build *and* run
-        # under upstream's test harness, which we deliberately bypass).
-        run(
-            "make",
-            "-C",
-            "tests",
-            f"LDFLAGS={ldflags_override}",
-            f"LIBS={libs_override}",
-            *_UPSTREAM_TEST_NAMES,
-            f"-j{nproc}",
-            cwd=repo,
-            env=env,
-            docker=self.docker,
-        )
-
-        # libtool drops the unwrapped ELF under tests/.libs/<name>; in
-        # the rare case it inlines the binary directly into tests/<name>
-        # (e.g. when no shared-library wrapper is needed) fall back to
-        # the flat path.
-        for name, dest in zip(_UPSTREAM_TEST_NAMES, dests):
-            src = repo / "tests" / ".libs" / name
-            if not src.is_file():
-                src = repo / "tests" / name
-            if not src.is_file():
-                log.fatal(
-                    f"upstream test binary missing: {name} "
-                    "(looked under tests/.libs/ and tests/)",
-                    code=EXIT_BUILD_FAILURE,
-                )
-            shutil.copy2(src, dest)
         return dests
 
     # ------------------------------------------------------------------
