@@ -23,11 +23,13 @@ from pathlib import Path
 
 from nanvix_zutil import (
     CFG_SYSROOT,
-    TOOLCHAIN_CONTAINER_PATH,
     EXIT_BUILD_FAILURE,
     EXIT_MISSING_DEP,
+    TOOLCHAIN_CONTAINER_PATH,
     ZScript,
     log,
+    make_initrd,
+    run,
 )
 
 # ---------------------------------------------------------------------------
@@ -118,7 +120,11 @@ class XzBuild(ZScript):
         # executables" because it is told to link against host paths that
         # do not exist in the container's filesystem.
         toolchain = str(TOOLCHAIN_CONTAINER_PATH)
-        sysroot = self.translate_path(self._sysroot_path())
+        sysroot = (
+            self.docker.translate_path(self._sysroot_path())
+            if self.docker
+            else self._sysroot_path()
+        )
         bin_ = f"{toolchain}/bin"
         return {
             "AR": f"{bin_}/i686-nanvix-ar",
@@ -251,12 +257,12 @@ class XzBuild(ZScript):
             # ./configure and make both invoke the cross-toolchain, so
             # they must run inside the docker-wrapped build context
             # established by `./z setup --with-docker`.
-            self.run(
+            run(
                 "./configure",
                 *opts,
                 cwd=self.repo_root,
                 env=env,
-                docker=True,
+                docker=self.docker,
             )
             marker.write_text(wanted)
 
@@ -265,7 +271,7 @@ class XzBuild(ZScript):
             nproc = str(os.cpu_count() or 1)
         except Exception:
             nproc = "1"
-        self.run("make", f"-j{nproc}", cwd=self.repo_root, docker=True)
+        run("make", f"-j{nproc}", cwd=self.repo_root, docker=self.docker)
 
         # Stage a curated install image and copy the subset we ship into
         # build/ at the layout the schema/release path expects.
@@ -291,12 +297,12 @@ class XzBuild(ZScript):
             shutil.rmtree(stage)
         stage.mkdir(parents=True)
 
-        self.run(
+        run(
             "make",
             "install",
-            f"DESTDIR={self.translate_path(stage)}",
+            f"DESTDIR={(self.docker.translate_path(stage) if self.docker else stage)}",
             cwd=repo,
-            docker=True,
+            docker=self.docker,
         )
 
         # The configure --prefix=/sysroot lands files under
@@ -425,7 +431,11 @@ class XzBuild(ZScript):
         # library at link time).  The configure-time LIBS="" invariant
         # in _configure_env_overrides is unaffected — that recipe is
         # only consumed by ./configure, never by make.
-        sysroot = self.translate_path(self._sysroot_path())
+        sysroot = (
+            self.docker.translate_path(self._sysroot_path())
+            if self.docker
+            else self._sysroot_path()
+        )
         env = dict(os.environ)
         env.update(self._configure_env_overrides())
         ldflags_override = f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib"
@@ -441,7 +451,7 @@ class XzBuild(ZScript):
         # individual binary names as explicit targets so we build them
         # without running them (``make check`` would build *and* run
         # under upstream's test harness, which we deliberately bypass).
-        self.run(
+        run(
             "make",
             "-C",
             "tests",
@@ -451,7 +461,7 @@ class XzBuild(ZScript):
             f"-j{nproc}",
             cwd=repo,
             env=env,
-            docker=True,
+            docker=self.docker,
         )
 
         # libtool drops the unwrapped ELF under tests/.libs/<name>; in
@@ -637,7 +647,7 @@ class XzBuild(ZScript):
                         )
                     shutil.copy2(elf, repo_elf)
                     copied_elf = True
-                initrd = self.make_initrd(elf.name)
+                initrd = make_initrd(self, elf.name)
                 with tempfile.TemporaryDirectory(prefix=f"xz_test_{name}_") as tmp:
                     tmp_path = Path(tmp)
                     ramfs_dir = tmp_path / "ramfs"
@@ -645,16 +655,15 @@ class XzBuild(ZScript):
                     (ramfs_dir / "tmp").mkdir()
                     ramfs_img = tmp_path / "rootfs.img"
 
-                    self.run(
+                    run(
                         str(mkramfs),
                         "-o",
                         str(ramfs_img),
                         str(ramfs_dir),
-                        docker=False,
                         timeout=60,
                     )
 
-                    self.run(
+                    run(
                         str(sysroot / "bin" / "nanvixd.elf"),
                         "-bin-dir",
                         str(sysroot / "bin"),
@@ -662,7 +671,6 @@ class XzBuild(ZScript):
                         str(ramfs_img),
                         "--",
                         str(initrd),
-                        docker=False,
                         timeout=180,
                     )
                 log.info(f"  PASS: {name}")
@@ -712,16 +720,15 @@ class XzBuild(ZScript):
                     (ramfs_dir / "tmp").mkdir()
                     ramfs_img = tmp_path / "rootfs.img"
 
-                    self.run(
+                    run(
                         str(mkramfs),
                         "-o",
                         str(ramfs_img),
                         str(ramfs_dir),
-                        docker=False,
                         timeout=60,
                     )
 
-                    self.run(
+                    run(
                         str(nanvixd),
                         "-bin-dir",
                         str(sysroot / "bin"),
@@ -729,7 +736,6 @@ class XzBuild(ZScript):
                         str(ramfs_img),
                         "--",
                         str(elf.resolve()),
-                        docker=False,
                         timeout=180,
                     )
                 log.info(f"  PASS: {name}")
@@ -829,7 +835,7 @@ class XzBuild(ZScript):
                         )
                     shutil.copy2(binary, repo_elf)
                     copied_elf = True
-                initrd = self.make_initrd(binary.name)
+                initrd = make_initrd(self, binary.name)
                 with tempfile.TemporaryDirectory(
                     prefix=f"nanvix_{name}_",
                     ignore_cleanup_errors=True,
@@ -840,16 +846,15 @@ class XzBuild(ZScript):
                     (ramfs_dir / "tmp").mkdir(exist_ok=True)
                     ramfs_img = tmpdir_path / f"rootfs_{name}.img"
 
-                    self.run(
+                    run(
                         str(mkramfs),
                         "-o",
                         str(ramfs_img),
                         str(ramfs_dir),
-                        docker=False,
                         timeout=60,
                     )
 
-                    self.run(
+                    run(
                         str(nanvixd),
                         "-bin-dir",
                         str(sysroot_path / "bin"),
@@ -857,7 +862,6 @@ class XzBuild(ZScript):
                         str(ramfs_img),
                         "--",
                         str(initrd),
-                        docker=False,
                         timeout=180,
                     )
                 print(f"OK   {name}")
