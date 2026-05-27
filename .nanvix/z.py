@@ -404,7 +404,7 @@ class XzBuild(ZScript):
 
         Pure path computation -- does not touch the filesystem and
         does not invoke any subprocess.  Used by both the build-time
-        cross-compile and the host-side test tiers to agree on where
+        cross-compile and the host-side test runner to agree on where
         the upstream test ELFs live.
         """
         dest_dir = self.repo_root / "build" / "tests"
@@ -414,8 +414,8 @@ class XzBuild(ZScript):
         """Return the cached upstream test ELFs (host-side; no docker).
 
         Asserts every expected ELF exists; if any are missing, fails
-        with a hint to run ``./z build`` first.  Used
-        by the test tiers, which must never reach the cross-toolchain.
+        with a hint to run ``./z build`` first.  Used by the test
+        runner, which must never reach the cross-toolchain.
         """
         dests = self._expected_test_paths()
         missing = [d for d in dests if not d.is_file()]
@@ -428,109 +428,38 @@ class XzBuild(ZScript):
         return dests
 
     # ------------------------------------------------------------------
-    # Test ladder
+    # Tests
     # ------------------------------------------------------------------
 
     def test(self) -> None:
-        """Run the three-tier test ladder.
+        """Run the upstream ``check_PROGRAMS`` functional tests.
 
-        Without arguments runs smoke -> integration -> functional in
-        order.  When invoked as ``./z test -- <tier> [<tier> ...]`` the
-        named tiers run in the order given (mirrors the reusable CI
-        workflow's ``standalone-test-args`` knob so callers can ask for
-        ``test-smoke test-integration`` only on slow standalone cells).
+        Functional tests boot each upstream test binary under
+        ``nanvixd`` and therefore exercise the full stack (artefact
+        presence, ELF validity, and runtime behaviour), so no
+        separate smoke or integration tier is provided.
+
+        Any positional arguments (formerly used to select tiers via
+        ``./z test -- <tier>``) are rejected loudly so legacy callers
+        that still pass ``test-smoke`` / ``test-integration`` /
+        ``test-functional`` fail fast with an actionable message
+        instead of silently running the full suite.
         """
+        if self.targets:
+            log.fatal(
+                f"./z test takes no arguments (got: {' '.join(self.targets)})",
+                code=EXIT_BUILD_FAILURE,
+                hint=(
+                    "The smoke and integration tiers were removed; "
+                    "`./z test` now always runs the functional tier. "
+                    "Drop any `test-smoke`/`test-integration`/"
+                    "`test-functional` arguments from your invocation."
+                ),
+            )
         if IS_WINDOWS:
             self._run_tests_windows()
             return
-
-        tier_map = {
-            "smoke": self._test_smoke,
-            "test-smoke": self._test_smoke,
-            "integration": self._test_integration,
-            "test-integration": self._test_integration,
-            "functional": self._test_functional,
-            "test-functional": self._test_functional,
-        }
-        if self.targets:
-            unknown = [t for t in self.targets if t not in tier_map]
-            if unknown:
-                log.fatal(
-                    f"Unknown test target(s): {', '.join(unknown)}",
-                    code=EXIT_BUILD_FAILURE,
-                    hint=f"Known: {', '.join(sorted(set(tier_map)))}",
-                )
-            tiers = [tier_map[t] for t in self.targets]
-        else:
-            tiers = [self._test_smoke, self._test_integration, self._test_functional]
-        for tier in tiers:
-            tier()
-
-    def _test_smoke(self) -> None:
-        """Verify build artefacts exist and look sane (no runtime)."""
-        log.info("=== xz smoke tests ===")
-        build_dir = self.repo_root / "build"
-        liblzma = build_dir / "liblzma.a"
-        header = build_dir / "include" / "lzma.h"
-        pc = build_dir / "lib" / "pkgconfig" / "liblzma.pc"
-        for path, floor in (
-            (liblzma, 100_000),
-            (header, 0),
-            (pc, 0),
-        ):
-            if not path.is_file():
-                log.fatal(
-                    f"smoke: missing artefact {path}",
-                    code=EXIT_BUILD_FAILURE,
-                    hint="Run `./z build` first.",
-                )
-            size = path.stat().st_size
-            if size < floor:
-                log.fatal(
-                    f"smoke: {path} too small ({size} < {floor})",
-                    code=EXIT_BUILD_FAILURE,
-                )
-            log.info(f"  OK: {path.name} ({size} bytes)")
-        log.info("  PASS: xz smoke tests")
-
-    def _test_integration(self) -> None:
-        """Confirm every upstream test binary is a static ELF."""
-        log.info("=== xz integration tests ===")
-        elfs = self._locate_upstream_tests()
-        # Verify ELF format via magic bytes -- the source of truth
-        # and dependency-free.  file(1), if present, is queried only
-        # for the human-readable 'statically linked' confirmation; its
-        # absence (e.g. on minimal Windows runners) must not fail the
-        # tier.  No size floor: the six upstream ELFs vary widely;
-        # presence + ELF magic is the contract.
-        for elf in elfs:
-            if not elf.is_file():
-                log.fatal(
-                    f"integration: missing {elf}",
-                    code=EXIT_BUILD_FAILURE,
-                )
-            with elf.open("rb") as fh:
-                magic = fh.read(4)
-            if magic != b"\x7fELF":
-                log.fatal(
-                    f"integration: {elf.name} is not an ELF binary (magic={magic!r})",
-                    code=EXIT_BUILD_FAILURE,
-                )
-            try:
-                file_out = subprocess.run(
-                    ["file", str(elf)],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                ).stdout.lower()
-            except (FileNotFoundError, subprocess.CalledProcessError):
-                file_out = ""
-            if file_out and "statically" not in file_out:
-                log.info(
-                    f"  WARN: file(1) did not report 'statically linked' for {elf.name}"
-                )
-            log.info(f"  OK: {elf.name} ({elf.stat().st_size} bytes, ELF)")
-        log.info("  PASS: xz integration tests")
+        self._test_functional()
 
     def _test_functional(self) -> None:
         """Run every upstream check_PROGRAMS test under nanvixd.elf.
