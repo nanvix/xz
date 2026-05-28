@@ -7,11 +7,36 @@
 
 set -euo pipefail
 
-PINNED_VERSION="0.10.2"
-RAW_ZUTIL_VERSION="${NANVIX_ZUTIL_VERSION:-$PINNED_VERSION}"
-ZUTIL_VERSION="${RAW_ZUTIL_VERSION#v}"
 REPO_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd -P)"
 VENV="$REPO_ROOT/.nanvix/venv"
+VERSION_FILE="$REPO_ROOT/.zutils-version"
+
+# Resolve the pinned nanvix-zutil version. `.zutils-version` at the repo
+# root is the sole source of truth: no env-var override, no GitHub fetch.
+# Downstream consumers commit this file; CI and developers see the same
+# pin without ambient configuration.
+function _resolve_zutil_version() {
+    # RAW_ZUTIL_VERSION and ZUTIL_VERSION are intentionally global;
+    # they are consumed by bootstrap() below.
+    if [ ! -f "$VERSION_FILE" ]; then
+        echo "Error: $VERSION_FILE not found." >&2
+        echo "       Create it with a pinned nanvix-zutil version, e.g. 'v0.10.2'." >&2
+        exit 1
+    fi
+    local raw
+    raw="$(tr -d '[:space:]' <"$VERSION_FILE")"
+    if [ -z "$raw" ]; then
+        echo "Error: $VERSION_FILE is empty." >&2
+        exit 1
+    fi
+    if [[ ! "$raw" =~ ^v?[0-9]+\.[0-9]+\.[0-9]+([.-][[:alnum:].-]+)?$ ]]; then
+        echo "Error: invalid nanvix-zutil version '$raw' in $VERSION_FILE (expected vX.Y.Z)." >&2
+        exit 1
+    fi
+    RAW_ZUTIL_VERSION="$raw"
+    ZUTIL_VERSION="${RAW_ZUTIL_VERSION#v}"
+}
+_resolve_zutil_version
 
 # Resolve venv layout (bin/ vs Scripts/) based on what exists on disk.
 # Can be called before venv creation to initialize default paths; call it
@@ -126,8 +151,7 @@ function bootstrap_local() {
 }
 
 function bootstrap() {
-    # Pin nanvix-zutil version for reproducible bootstrapping.
-    # Override with NANVIX_ZUTIL_VERSION env var if needed.
+    # nanvix-zutil version comes from .zutils-version (resolved above).
     local reason="${1:-not found}"
     echo "nanvix-zutil ${reason} -- bootstrapping nanvix-zutil==${ZUTIL_VERSION}..." >&2
 
