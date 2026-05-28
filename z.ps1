@@ -11,17 +11,33 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-$zutilVersion = if ($env:NANVIX_ZUTIL_VERSION) {
-    $env:NANVIX_ZUTIL_VERSION
-}
-else {
-    "0.10.2"
-}
-$zutilVersion = $zutilVersion -replace "^v", ""
-
 # z.ps1 lives at the repository root, so use its directory directly
 # instead of relying on git to discover the top-level checkout directory.
 $repoRoot = $PSScriptRoot
+$versionFile = Join-Path $repoRoot ".zutils-version"
+
+# Resolve the pinned nanvix-zutil version. `.zutils-version` at the repo
+# root is the sole source of truth: no env-var override, no GitHub fetch.
+# Downstream consumers commit this file; CI and developers see the same
+# pin without ambient configuration.
+function Resolve-ZutilVersion {
+    if (-not (Test-Path -LiteralPath $versionFile)) {
+        throw "Error: $versionFile not found.`n       Create it with a pinned nanvix-zutil version, e.g. 'v0.10.2'."
+    }
+    $content = Get-Content -LiteralPath $versionFile -Raw
+    $raw = if ($null -eq $content) { "" } else { $content.Trim() }
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        throw "Error: $versionFile is empty."
+    }
+    if ($raw -notmatch '^v?\d+\.\d+\.\d+([.-][A-Za-z0-9.-]+)?$') {
+        throw "Error: invalid nanvix-zutil version '$raw' in $versionFile (expected vX.Y.Z)."
+    }
+    return $raw
+}
+
+$rawZutilVersion = Resolve-ZutilVersion
+$zutilVersion = $rawZutilVersion -replace "^v", ""
+
 $venvDir = Join-Path $repoRoot ".nanvix\venv"
 $venvPython = Join-Path $venvDir "Scripts\python.exe"
 $venvZutil = Join-Path $venvDir "Scripts\nanvix-zutil.exe"
@@ -135,8 +151,7 @@ function NewZutilVenv {
 
 function Bootstrap {
     param([string]$Reason = "not found")
-    # Pin nanvix-zutil version for reproducible bootstrapping.
-    # Override with NANVIX_ZUTIL_VERSION env var if needed.
+    # nanvix-zutil version comes from .zutils-version (resolved above).
     Write-Information "nanvix-zutil ${Reason} -- bootstrapping nanvix-zutil==${zutilVersion}..." -InformationAction Continue
 
     $wheelUrl = "https://github.com/nanvix/zutils/releases/download/v${zutilVersion}/nanvix_zutil-${zutilVersion}-py3-none-any.whl"
