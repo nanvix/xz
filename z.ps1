@@ -57,8 +57,7 @@ catch {
     $null
 }
 
-# Extract --with-zutils PATH and --with-nanvix PATH before forwarding to
-# nanvix-zutil.
+# Extract --with-zutils PATH before forwarding to nanvix-zutil.
 #
 # --with-zutils PATH (optional): install nanvix-zutil from a local source
 # tree (editable) instead of fetching the pinned wheel from GitHub Releases.
@@ -83,25 +82,6 @@ while ($i -lt $ZArgs.Count) {
     }
     elseif ($ZArgs[$i] -match '^--with-zutils=(.+)$') {
         $withZutils = $Matches[1]
-        $i++
-    }
-    elseif ($ZArgs[$i] -eq '--with-nanvix') {
-        if ($i + 1 -ge $ZArgs.Count) {
-            throw "ERROR: --with-nanvix requires a path argument"
-        }
-        $item = Get-Item -LiteralPath $ZArgs[$i + 1] -ErrorAction Stop
-        if (-not $item.PSIsContainer) {
-            throw "ERROR: --with-nanvix path is not a directory: $($ZArgs[$i + 1])"
-        }
-        $env:WITH_NANVIX = $item.FullName
-        $i += 2
-    }
-    elseif ($ZArgs[$i] -match '^--with-nanvix=(.+)$') {
-        $item = Get-Item -LiteralPath $Matches[1] -ErrorAction Stop
-        if (-not $item.PSIsContainer) {
-            throw "ERROR: --with-nanvix path is not a directory: $($Matches[1])"
-        }
-        $env:WITH_NANVIX = $item.FullName
         $i++
     }
     else {

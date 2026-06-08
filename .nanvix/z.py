@@ -18,7 +18,6 @@ import shlex
 import shutil
 import subprocess
 import sys
-import tarfile
 import tempfile
 from pathlib import Path
 
@@ -31,6 +30,12 @@ from nanvix_zutil import (
     log,
     make_initrd,
     run,
+)
+from nanvix_zutil.paths import (
+    include_out,
+    lib_out,
+    repo_root,
+    test_out,
 )
 
 # ---------------------------------------------------------------------------
@@ -212,7 +217,7 @@ class XzBuild(ZScript):
         on a host with autotools, then ``git add -f`` the regenerated
         files (see NANVIX.md / Refreshing vendored autotools outputs).
         """
-        configure = self.repo_root / "configure"
+        configure = repo_root() / "configure"
         if not configure.exists():
             log.fatal(
                 "./configure is missing from the port tree.",
@@ -250,7 +255,7 @@ class XzBuild(ZScript):
         because ``make install DESTDIR=...`` and the test-ELF copy-back
         write through the bind-mounted workspace.
         """
-        repo = self.repo_root
+        repo = repo_root()
         opts = self._configure_opts()
         overrides = self._configure_env_overrides()
 
@@ -354,7 +359,7 @@ class XzBuild(ZScript):
         by the time we get here ``build/_install/sysroot/`` already
         exists on the host filesystem (written through the bind mount).
         """
-        repo = self.repo_root
+        repo = repo_root()
         build_dir = repo / "build"
         stage = repo / _INSTALL_STAGE_REL
 
@@ -399,6 +404,45 @@ class XzBuild(ZScript):
 
         log.info(f"Staged artefacts under {build_dir}")
 
+        # Also stage into .nanvix/out/release/{lib,include} and
+        # .nanvix/out/test/ so the inherited ZScript.release() packages
+        # them and `./z test` consumers can find the test ELFs in the
+        # canonical location.  These are pure host-side copies; the
+        # files in build/ are read-only inputs to the staging step.
+        self._stage_release_outputs()
+
+    def _stage_release_outputs(self) -> None:
+        """Mirror build/{lib,include} into lib_out()/include_out() and
+        build/tests/*.elf into test_out() for the inherited release().
+        """
+        build_dir = repo_root() / "build"
+        lib_dir = build_dir / "lib"
+        include_dir = build_dir / "include"
+        tests_dir = build_dir / "tests"
+
+        lib_o = lib_out()
+        inc_o = include_out()
+        tst_o = test_out()
+        (lib_o / "pkgconfig").mkdir(parents=True, exist_ok=True)
+        (inc_o / "lzma").mkdir(parents=True, exist_ok=True)
+        tst_o.mkdir(parents=True, exist_ok=True)
+
+        shutil.copy2(lib_dir / "liblzma.a", lib_o / "liblzma.a")
+        shutil.copy2(
+            lib_dir / "pkgconfig" / "liblzma.pc",
+            lib_o / "pkgconfig" / "liblzma.pc",
+        )
+        shutil.copy2(include_dir / "lzma.h", inc_o / "lzma.h")
+        lzma_dst = inc_o / "lzma"
+        if lzma_dst.exists():
+            shutil.rmtree(lzma_dst)
+        shutil.copytree(include_dir / "lzma", lzma_dst)
+
+        for elf in sorted(tests_dir.glob("*.elf")):
+            shutil.copy2(elf, tst_o / elf.name)
+
+        log.info(f"Staged release outputs under {lib_o.parent}")
+
     def _expected_test_paths(self) -> list[Path]:
         """Return the expected ``build/tests/<name>.elf`` paths.
 
@@ -407,7 +451,7 @@ class XzBuild(ZScript):
         cross-compile and the host-side test runner to agree on where
         the upstream test ELFs live.
         """
-        dest_dir = self.repo_root / "build" / "tests"
+        dest_dir = repo_root() / "build" / "tests"
         return [dest_dir / f"{name}.elf" for name in _UPSTREAM_TEST_NAMES]
 
     def _locate_upstream_tests(self) -> list[Path]:
@@ -511,7 +555,7 @@ class XzBuild(ZScript):
             log.info(f"  Running {name}...")
             # make_initrd resolves binaries relative to repo_root;
             # copy the ELF there temporarily unless it already lives there.
-            repo_elf = self.repo_root / elf.name
+            repo_elf = repo_root() / elf.name
             copied_elf = False
             initrd: Path | None = None
             try:
@@ -522,7 +566,7 @@ class XzBuild(ZScript):
                         )
                     shutil.copy2(elf, repo_elf)
                     copied_elf = True
-                initrd = make_initrd(self, elf.name)
+                initrd = make_initrd(self, elf.name, test=True)
                 with tempfile.TemporaryDirectory(prefix=f"xz_test_{name}_") as tmp:
                     tmp_path = Path(tmp)
                     ramfs_dir = tmp_path / "ramfs"
@@ -672,9 +716,9 @@ class XzBuild(ZScript):
         candidates: list[Path] = []
         seen: set[str] = set()
         for d in (
-            self.repo_root / "build" / "tests",
-            self.repo_root / "build",
-            self.repo_root,
+            repo_root() / "build" / "tests",
+            repo_root() / "build",
+            repo_root(),
         ):
             if d.is_dir():
                 for p in sorted(d.glob("*.elf")):
@@ -699,7 +743,7 @@ class XzBuild(ZScript):
             print(f"RUN  {name}...")
             # make_initrd resolves binaries relative to repo_root;
             # copy the ELF there temporarily unless it already lives there.
-            repo_elf = self.repo_root / binary.name
+            repo_elf = repo_root() / binary.name
             copied_elf = False
             initrd: Path | None = None
             try:
@@ -710,7 +754,7 @@ class XzBuild(ZScript):
                         )
                     shutil.copy2(binary, repo_elf)
                     copied_elf = True
-                initrd = make_initrd(self, binary.name)
+                initrd = make_initrd(self, binary.name, test=True)
                 with tempfile.TemporaryDirectory(
                     prefix=f"nanvix_{name}_",
                     ignore_cleanup_errors=True,
@@ -753,130 +797,9 @@ class XzBuild(ZScript):
             raise RuntimeError(f"{len(failed)} failed: {' '.join(failed)}")
         print(f"\t\t*** All {len(candidates)} tests PASSED ***")
 
-    # ------------------------------------------------------------------
-    # Release packaging
-    # ------------------------------------------------------------------
-
-    def release(self) -> None:
-        """Stage sysroot/{lib,include} into dist/ and tar it up.
-
-        Output layout (mirrors sqlite's ``Makefile.nanvix:233-267``):
-
-            dist/xz-<plat>-<mode>-<mem>/sysroot/lib/liblzma.a
-            dist/xz-<plat>-<mode>-<mem>/sysroot/lib/pkgconfig/liblzma.pc
-            dist/xz-<plat>-<mode>-<mem>/sysroot/include/lzma.h
-            dist/xz-<plat>-<mode>-<mem>/sysroot/include/lzma/*.h
-            dist/xz-<plat>-<mode>-<mem>.tar.gz
-
-        Then re-opens the tarball and asserts the four expected paths
-        are present (acceptance criterion #4).  Pure-Python tarfile is
-        used so the release path has no external ``tar`` dependency on
-        Windows runners.
-        """
-        repo = self.repo_root
-        build_dir = repo / "build"
-        if not (build_dir / "liblzma.a").is_file():
-            log.fatal(
-                "build/ artefacts missing; run `./z build` first.",
-                code=EXIT_BUILD_FAILURE,
-            )
-
-        artifact = (
-            f"xz-{self.config.machine}"
-            f"-{self.config.deployment_mode}"
-            f"-{self.config.memory_size}"
-        )
-        dist_dir = repo / "dist"
-        staging = dist_dir / artifact
-        sysroot = staging / "sysroot"
-
-        # Fresh stage every time -- the tarball is the canonical output.
-        if staging.exists():
-            shutil.rmtree(staging)
-        (sysroot / "lib" / "pkgconfig").mkdir(parents=True, exist_ok=True)
-        (sysroot / "include" / "lzma").mkdir(parents=True, exist_ok=True)
-
-        # Source -> dest pairs (file copies; no globs to keep the
-        # contract explicit).
-        copies: list[tuple[Path, Path]] = [
-            (build_dir / "liblzma.a", sysroot / "lib" / "liblzma.a"),
-            (
-                build_dir / "lib" / "pkgconfig" / "liblzma.pc",
-                sysroot / "lib" / "pkgconfig" / "liblzma.pc",
-            ),
-            (build_dir / "include" / "lzma.h", sysroot / "include" / "lzma.h"),
-        ]
-        for src, dst in copies:
-            if not src.is_file():
-                log.fatal(
-                    f"release: missing input {src}",
-                    code=EXIT_BUILD_FAILURE,
-                )
-            shutil.copy2(src, dst)
-
-        # Header subdirectory (lzma/*.h) -- copytree is fine since the
-        # destination was just created empty.
-        lzma_subdir_src = build_dir / "include" / "lzma"
-        if not lzma_subdir_src.is_dir():
-            log.fatal(
-                f"release: missing header dir {lzma_subdir_src}",
-                code=EXIT_BUILD_FAILURE,
-            )
-        lzma_subdir_dst = sysroot / "include" / "lzma"
-        if lzma_subdir_dst.exists():
-            shutil.rmtree(lzma_subdir_dst)
-        shutil.copytree(lzma_subdir_src, lzma_subdir_dst)
-
-        # Build the gzip-compressed tarball; arcname strips the
-        # staging dir prefix so paths inside the archive begin at
-        # ``sysroot/``.
-        tarball = dist_dir / f"{artifact}.tar.gz"
-        if tarball.exists():
-            tarball.unlink()
-        with tarfile.open(tarball, "w:gz") as tf:
-            tf.add(sysroot, arcname="sysroot")
-        log.info(f"Wrote release tarball: {tarball}")
-
-        self._verify_release(tarball)
-
-    def _verify_release(self, tarball: Path) -> None:
-        """Re-open the tarball and assert the four required paths exist.
-
-        Mirrors sqlite's ``verify-package`` step.  Anything missing
-        here fails CI before the artefact is uploaded, so a downstream
-        port (cpython) never sees a half-empty release.
-        """
-        required = {
-            "sysroot/lib/liblzma.a",
-            "sysroot/lib/pkgconfig/liblzma.pc",
-            "sysroot/include/lzma.h",
-        }
-        # The header subdirectory is enforced by membership: at least
-        # one entry beneath sysroot/include/lzma/ must be present.
-        with tarfile.open(tarball, "r:gz") as tf:
-            members = tf.getnames()
-        present = set(members)
-        missing = sorted(required - present)
-        if missing:
-            log.fatal(
-                f"release: tarball missing required paths: {missing}",
-                code=EXIT_BUILD_FAILURE,
-                hint=f"Tarball: {tarball}",
-            )
-        if not any(
-            m.startswith("sysroot/include/lzma/") and m != "sysroot/include/lzma"
-            for m in members
-        ):
-            log.fatal(
-                "release: tarball has no entries under sysroot/include/lzma/",
-                code=EXIT_BUILD_FAILURE,
-                hint=f"Tarball: {tarball}",
-            )
-        log.info(f"Verified release tarball: {tarball}")
-
     def clean(self) -> None:
         """Remove build artefacts and the configure sentinel."""
-        repo = self.repo_root
+        repo = repo_root()
         marker = repo / _CONFIGURED_MARKER
         if marker.exists():
             marker.unlink()
