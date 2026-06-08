@@ -53,9 +53,9 @@ function _resolve_venv_paths() {
 _resolve_venv_paths
 ZUTIL_GLOBAL_VERSION="$(nanvix-zutil --version 2>/dev/null || true)"
 
-# Extract --with-zutils PATH and --with-nanvix PATH before forwarding to
-# nanvix-zutil.  The nanvix-zutil CLI inspects positional args to find the
-# subcommand; either flag's PATH argument would be mistaken for a subcommand.
+# Extract --with-zutils PATH before forwarding to nanvix-zutil.  The
+# nanvix-zutil CLI inspects positional args to find the subcommand; the
+# flag's PATH argument would otherwise be mistaken for a subcommand.
 #
 # --with-zutils PATH (optional): install nanvix-zutil from a local source
 # tree (editable) instead of fetching the pinned wheel from GitHub Releases.
@@ -67,8 +67,6 @@ ZUTIL_GLOBAL_VERSION="$(nanvix-zutil --version 2>/dev/null || true)"
 # The path must point at a nanvix-zutil source checkout (a directory
 # containing pyproject.toml).  The venv version-match check is bypassed; the
 # editable install is rebuilt only when the recorded source path changes.
-#
-# --with-nanvix PATH is forwarded to z.py via the WITH_NANVIX env var.
 WITH_ZUTILS=""
 _resolve_zutils_path() {
     local raw="$1"
@@ -90,15 +88,6 @@ _resolve_zutils_path() {
     fi
 }
 
-_resolve_nanvix_path() {
-    local raw="$1"
-    if ! WITH_NANVIX="$(cd -- "$raw" 2>/dev/null && pwd -P)"; then
-        echo "ERROR: --with-nanvix path does not exist or is not a directory: $raw" >&2
-        exit 1
-    fi
-    export WITH_NANVIX
-}
-
 ARGS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -112,18 +101,6 @@ while [[ $# -gt 0 ]]; do
                 exit 1
             fi
             _resolve_zutils_path "$2"
-            shift 2
-            ;;
-        --with-nanvix=*)
-            _resolve_nanvix_path "${1#--with-nanvix=}"
-            shift
-            ;;
-        --with-nanvix)
-            if [[ $# -lt 2 ]]; then
-                echo "ERROR: --with-nanvix requires a path argument" >&2
-                exit 1
-            fi
-            _resolve_nanvix_path "$2"
             shift 2
             ;;
         *)
