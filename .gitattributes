@@ -1,0 +1,17 @@
+# Vendored Unix shell / autotools scripts must keep LF line endings so
+# the build runs inside the Linux toolchain container regardless of a
+# contributor's git `core.autocrlf` setting. Windows checkouts with
+# autocrlf=true otherwise rewrite these to CRLF, which dash rejects
+# ("Syntax error: newline unexpected" inside case/esac).
+configure     text eol=lf
+config.guess  text eol=lf
+config.sub    text eol=lf
+install-sh    text eol=lf
+depcomp       text eol=lf
+missing       text eol=lf
+compile       text eol=lf
+ar-lib        text eol=lf
+ltmain.sh     text eol=lf
+test-driver   text eol=lf
+*.sh          text eol=lf
+build-aux/*   text eol=lf

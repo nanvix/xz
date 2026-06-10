@@ -154,7 +154,7 @@ class XzBuild(ZScript):
             "RANLIB": f"{bin_}/i686-nanvix-ranlib",
             "STRIP": f"{bin_}/i686-nanvix-strip",
             "NM": f"{bin_}/i686-nanvix-nm",
-            "CFLAGS": f"-O2 -D_GNU_SOURCE -I{sysroot}/include",
+            "CFLAGS": f"-O2 -fPIC -D_GNU_SOURCE -I{sysroot}/include",
             "CPPFLAGS": f"-D_GNU_SOURCE -I{sysroot}/include",
             "LDFLAGS": (
                 f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib "
@@ -316,13 +316,33 @@ class XzBuild(ZScript):
         tests_targets = " ".join(_UPSTREAM_TEST_NAMES)
 
         # Single shell script: configure -> make -> install ->
-        # tests-build -> copy test ELFs out to the mounted workspace.
+        # liblzma.so -> tests-build -> copy test ELFs out to the mounted
+        # workspace.
+        #
+        # liblzma.so is linked from the (now PIC) static archive via
+        # --whole-archive so every liblzma entry point becomes part of
+        # the .so's .dynsym. DT_SONAME=liblzma.so so consumers that link
+        # against it emit a proper DT_NEEDED entry. libc / libm symbols
+        # (memcpy, memset, malloc, ...) are left UND via -nostdlib and
+        # bind at dlopen time against the host executable's .dynsym,
+        # the same model already used by other Nanvix shared libraries
+        # such as libffi.so / libssl.so.
+        cc = overrides["CC"]
         script = "\n".join(
             [
                 "set -e",
                 configure_cmd,
                 f"make -j{nproc}",
                 f"make install DESTDIR={shlex.quote(str(stage_container))}",
+                # Build liblzma.so from the (PIC) liblzma.a libtool produced.
+                # libtool's shared-library detection does not know about
+                # i686-nanvix (hence --disable-shared in configure opts),
+                # so we link the .so ourselves and stage it next to .a.
+                f"{shlex.quote(cc)} -shared -fPIC -nostdlib "
+                f" -Wl,-soname,liblzma.so -Wl,-z,noexecstack"
+                f" -Wl,--whole-archive src/liblzma/.libs/liblzma.a"
+                f" -Wl,--no-whole-archive"
+                f" -o {shlex.quote(str(stage_container))}/sysroot/lib/liblzma.so",
                 (
                     "make -C tests "
                     f"LDFLAGS={shlex.quote(tests_ldflags)} "
@@ -390,19 +410,21 @@ class XzBuild(ZScript):
             )
 
         # Clear any prior staged outputs but keep _install/ in place.
-        for name in ("liblzma.a", "include", "lib"):
+        for name in ("liblzma.a", "liblzma.so", "include", "lib"):
             target = build_dir / name
             if target.is_dir():
                 shutil.rmtree(target)
             elif target.exists():
                 target.unlink()
 
-        # liblzma.a → build/liblzma.a (and also build/lib/liblzma.a for
-        # the release packaging step in a later commit).
+        # liblzma.a / liblzma.so → build/liblzma.{a,so} and also
+        # build/lib/liblzma.{a,so} for the release packaging step.
         lib_dir = build_dir / "lib"
         lib_dir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src_root / "lib" / "liblzma.a", lib_dir / "liblzma.a")
         shutil.copy2(src_root / "lib" / "liblzma.a", build_dir / "liblzma.a")
+        shutil.copy2(src_root / "lib" / "liblzma.so", lib_dir / "liblzma.so")
+        shutil.copy2(src_root / "lib" / "liblzma.so", build_dir / "liblzma.so")
 
         # liblzma.pc → build/lib/pkgconfig/liblzma.pc
         pc_src = src_root / "lib" / "pkgconfig" / "liblzma.pc"
@@ -445,6 +467,7 @@ class XzBuild(ZScript):
         tst_o.mkdir(parents=True, exist_ok=True)
 
         shutil.copy2(lib_dir / "liblzma.a", lib_o / "liblzma.a")
+        shutil.copy2(lib_dir / "liblzma.so", lib_o / "liblzma.so")
         shutil.copy2(
             lib_dir / "pkgconfig" / "liblzma.pc",
             lib_o / "pkgconfig" / "liblzma.pc",
