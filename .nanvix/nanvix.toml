@@ -1,7 +1,7 @@
 [package]
 name = "xz"
 version = "5.2.5"
-nanvix-version = "0.16.17"
+nanvix-version = "0.16.32"
 
 [builds]
 [builds.matrix]
