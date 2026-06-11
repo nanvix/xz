@@ -132,6 +132,14 @@ class XzBuild(ZScript):
             else self._sysroot_path()
         )
         bin_ = f"{toolchain}/bin"
+        # Since Nanvix 0.16.19, process startup (_start) lives in
+        # libnvx_crt0.a (it drives __nanvix_libc_start_main in libposix.a)
+        # and must be linked first so its strong _start overrides the
+        # toolchain's weak no-op stub; otherwise the guest never reaches
+        # main and hangs.  Probe the host sysroot so this is a no-op on
+        # older Nanvix releases that do not ship the archive.
+        crt0_host = os.path.join(self._sysroot_path(), "lib", "libnvx_crt0.a")
+        crt0 = f"{sysroot}/lib/libnvx_crt0.a " if os.path.exists(crt0_host) else ""
         return {
             "AR": f"{bin_}/i686-nanvix-ar",
             "AS": f"{bin_}/i686-nanvix-as",
@@ -146,7 +154,8 @@ class XzBuild(ZScript):
             "CPPFLAGS": f"-D_GNU_SOURCE -I{sysroot}/include",
             "LDFLAGS": (
                 f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib "
-                f"-Wl,--start-group -lposix -lc -lm -Wl,--end-group"
+                f"-Wl,--allow-multiple-definition "
+                f"-Wl,--start-group {crt0}-lposix -lc -lm -Wl,--end-group"
             ),
             # Intentionally empty: passing -Wl,--start-group via LIBS
             # breaks the sed pipeline that materialises liblzma.pc
@@ -292,8 +301,12 @@ class XzBuild(ZScript):
             if self.docker
             else self._sysroot_path()
         )
-        tests_ldflags = f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib"
-        tests_libs = "-Wl,--start-group,-lposix,-lc,-lm,--end-group"
+        tests_ldflags = f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib -Wl,--allow-multiple-definition"
+        # See _configure_env_overrides: link libnvx_crt0.a first (guarded so
+        # it is a no-op on Nanvix releases that predate the crt0 cutover).
+        crt0_host = os.path.join(self._sysroot_path(), "lib", "libnvx_crt0.a")
+        crt0 = f"{sysroot}/lib/libnvx_crt0.a," if os.path.exists(crt0_host) else ""
+        tests_libs = f"-Wl,--start-group,{crt0}-lposix,-lc,-lm,--end-group"
 
         configure_cmd = " ".join(["./configure", *(shlex.quote(o) for o in opts)])
         tests_targets = " ".join(_UPSTREAM_TEST_NAMES)
