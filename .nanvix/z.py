@@ -305,7 +305,18 @@ class XzBuild(ZScript):
             if self.docker
             else self._sysroot_path()
         )
-        tests_ldflags = f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib -Wl,--allow-multiple-definition"
+        # `-all-static`, not a bare `-static`: libtool treats `-static` as
+        # "prefer static *libtool* libraries" and never forwards it to the
+        # compiler driver, so the link silently goes dynamic now that the
+        # 0.17.x sysroot ships a libc.so.  A dynamic executable gets an INTERP
+        # and a PHDR-bearing first PT_LOAD that the linker maps one page
+        # *below* user.ld's BASE_ADDR (0x40000000); nanvixd then rejects it at
+        # load time with "do_elf32_load() invalid load address".  `-all-static`
+        # makes libtool pass its link_static_flag (`-static`) through to gcc,
+        # producing a fully static ELF whose first LOAD sits exactly at
+        # BASE_ADDR.  Harmless pre-0.17 (no libc.so meant the link was already
+        # static).
+        tests_ldflags = f"-all-static -T{sysroot}/lib/user.ld -L{sysroot}/lib -Wl,--allow-multiple-definition"
         # See _configure_env_overrides: link libnvx_crt0.a first (guarded so
         # it is a no-op on Nanvix releases that predate the crt0 cutover).
         crt0_host = os.path.join(self._sysroot_path(), "lib", "libnvx_crt0.a")
