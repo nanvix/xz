@@ -310,7 +310,28 @@ class XzBuild(ZScript):
         # it is a no-op on Nanvix releases that predate the crt0 cutover).
         crt0_host = os.path.join(self._sysroot_path(), "lib", "libnvx_crt0.a")
         crt0 = f"{sysroot}/lib/libnvx_crt0.a," if os.path.exists(crt0_host) else ""
-        tests_libs = f"-Wl,--start-group,{crt0}-lposix,-lc,-lm,--end-group"
+        # Link the cross-toolchain's newlib libc/libm explicitly instead of a
+        # bare -lc/-lm.  Since Nanvix 0.17.x the release sysroot ships its own
+        # libc.a/libm.a (the Rust "nanvix_libc"), and because the link passes
+        # -L{sysroot}/lib first a plain -lc would bind there.  That libc
+        # dropped newlib's global reentrancy pointer `_impure_ptr`, while the
+        # upstream xz tests are compiled against the toolchain's newlib
+        # <stdio.h> (the sysroot ships no headers) where `stderr` expands to
+        # `_impure_ptr` -- so the test ELFs fail to link with
+        # "undefined reference to `_impure_ptr'".  Pinning libc.a/libm.a to the
+        # toolchain keeps the whole stdio stack on newlib (a self-consistent
+        # FILE model); newlib's stream cookies call POSIX write/read/lseek,
+        # which nanvix_libc/libposix still exports, so runtime I/O still works.
+        # Stopgap until nanvix/nanvix#2683 restores `_impure_ptr` (or the
+        # sysroot ships matching headers).  No-op on pre-0.17 sysroots that
+        # never shipped their own libc and where -lc already resolved here.
+        # $NEWLIB_LIBC/$NEWLIB_LIBM are resolved by the build script below; the
+        # `-print-file-name` probe must run WITHOUT -L{sysroot}/lib so it
+        # returns the toolchain newlib path, not the sysroot's libc.a.
+        cc = f"{TOOLCHAIN_CONTAINER_PATH}/bin/i686-nanvix-gcc"
+        tests_libs = (
+            f"-Wl,--start-group,{crt0}-lposix,$NEWLIB_LIBC,$NEWLIB_LIBM,--end-group"
+        )
 
         configure_cmd = " ".join(["./configure", *(shlex.quote(o) for o in opts)])
         tests_targets = " ".join(_UPSTREAM_TEST_NAMES)
@@ -323,10 +344,14 @@ class XzBuild(ZScript):
                 configure_cmd,
                 f"make -j{nproc}",
                 f"make install DESTDIR={shlex.quote(str(stage_container))}",
+                # Resolve the toolchain's newlib libc/libm (see tests_libs).
+                # No -L flags here: -print-file-name must ignore the sysroot.
+                f"NEWLIB_LIBC=$({shlex.quote(cc)} -print-file-name=libc.a)",
+                f"NEWLIB_LIBM=$({shlex.quote(cc)} -print-file-name=libm.a)",
                 (
                     "make -C tests "
                     f"LDFLAGS={shlex.quote(tests_ldflags)} "
-                    f"LIBS={shlex.quote(tests_libs)} "
+                    f'LIBS="{tests_libs}" '
                     f"{tests_targets} -j{nproc}"
                 ),
                 f"mkdir -p {shlex.quote(str(tests_dest_container))}",
