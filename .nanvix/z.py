@@ -583,8 +583,6 @@ class XzBuild(ZScript):
 
         Creates an initrd bundling each test ELF with system daemons
         via make_initrd, and a ramfs providing /tmp for any test I/O.
-        The ELF is temporarily copied to the repo root because
-        make_initrd resolves binary paths relative to it.
         """
         sysroot = self._sysroot_path()
         mkramfs = sysroot / "bin" / "mkramfs.elf"
@@ -602,20 +600,9 @@ class XzBuild(ZScript):
         for elf in elfs:
             name = elf.stem
             log.info(f"  Running {name}...")
-            # make_initrd resolves binaries relative to repo_root;
-            # copy the ELF there temporarily unless it already lives there.
-            repo_elf = repo_root() / elf.name
-            copied_elf = False
             initrd: Path | None = None
             try:
-                if elf.resolve() != repo_elf.resolve():
-                    if repo_elf.exists():
-                        raise FileExistsError(
-                            f"refusing to clobber existing {repo_elf}"
-                        )
-                    shutil.copy2(elf, repo_elf)
-                    copied_elf = True
-                initrd = make_initrd(self, elf.name, test=True)
+                initrd = make_initrd(self, elf, test_out())
                 with tempfile.TemporaryDirectory(prefix=f"xz_test_{name}_") as tmp:
                     tmp_path = Path(tmp)
                     ramfs_dir = tmp_path / "ramfs"
@@ -648,8 +635,6 @@ class XzBuild(ZScript):
             finally:
                 if initrd is not None and initrd.exists():
                     initrd.unlink()
-                if copied_elf and repo_elf.exists():
-                    repo_elf.unlink()
 
         if failures:
             log.fatal(
@@ -769,10 +754,7 @@ class XzBuild(ZScript):
         # canonical workflow's `download-artifact` step and by
         # `_stage_release_outputs()` during `./z build` on the Linux
         # leg). Then fall back to the in-tree autoconf output dirs for
-        # local dev / forward-compat. `make_initrd` in zutils v0.13.0
-        # hardcodes `repo_root() / app`, so the per-binary block below
-        # stages a copy at the repo root when needed and cleans it up
-        # in `finally`.
+        # local dev / forward-compat.
         for d in (
             test_out(),
             repo_root() / "build" / "tests",
@@ -800,20 +782,9 @@ class XzBuild(ZScript):
         for binary in candidates:
             name = binary.stem
             print(f"RUN  {name}...")
-            # make_initrd resolves binaries relative to repo_root;
-            # copy the ELF there temporarily unless it already lives there.
-            repo_elf = repo_root() / binary.name
-            copied_elf = False
             initrd: Path | None = None
             try:
-                if binary.resolve() != repo_elf.resolve():
-                    # `copied_elf` is False whenever the repo-root copy
-                    # pre-existed, so cleanup never deletes a developer's
-                    # build output. Parity with bzip2/openssl/libffi.
-                    preexisted = repo_elf.exists()
-                    shutil.copy2(binary, repo_elf)
-                    copied_elf = not preexisted
-                initrd = make_initrd(self, binary.name, test=True)
+                initrd = make_initrd(self, binary, test_out())
                 with tempfile.TemporaryDirectory(
                     prefix=f"nanvix_{name}_",
                     ignore_cleanup_errors=True,
@@ -849,8 +820,6 @@ class XzBuild(ZScript):
             finally:
                 if initrd is not None and initrd.exists():
                     initrd.unlink()
-                if copied_elf and repo_elf.exists():
-                    repo_elf.unlink()
 
         if failed:
             raise RuntimeError(f"{len(failed)} failed: {' '.join(failed)}")
