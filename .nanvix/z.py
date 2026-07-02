@@ -47,6 +47,14 @@ from nanvix_zutil.paths import (
 # build runner path.  See sqlite's port for the same convention.
 _INSTALL_PREFIX = "/sysroot"
 
+# Clang target triple for the Nanvix i686 user-space ABI.  This is the LLVM
+# image's own default target, but we pass it explicitly on every clang
+# invocation so the build never silently falls back to a bare freestanding
+# target (e.g. i686-unknown-none): the "nanvix" OS component is what selects
+# the hosted driver behaviour (auto-linked crt0.o + newlib libc and the
+# baked-in --sysroot=/opt/nanvix) that this port relies on.
+_CLANG_TARGET = "i686-unknown-nanvix"
+
 # Sentinel honoured by `./configure` to make `./z build` idempotent.
 _CONFIGURED_MARKER = ".nanvix-configured"
 
@@ -81,12 +89,32 @@ IS_WINDOWS = sys.platform == "win32"
 class XzBuild(ZScript):
     """Build script for nanvix/xz."""
 
+    # Nanvix 0.18 (the LLVM-toolchain era that ships the clang cross-compiler
+    # this port now targets) merged the syscall backend that used to live in
+    # ``libposix.a`` directly into ``libc.a``, so the released sysroot no
+    # longer contains a standalone ``lib/libposix.a``.  Override the base
+    # class' required-files set to drop it; the functional tests only consume
+    # ``user.ld`` (the link script) plus the daemons at runtime.
+    SYSROOT_REQUIRED_FILES: tuple[str, ...] = (
+        "lib/user.ld",
+        "bin/nanvixd.elf",
+        "bin/kernel.elf",
+        "bin/mkramfs.elf",
+    )
+
+    SYSROOT_REQUIRED_FILES_WINDOWS: tuple[str, ...] = (
+        "lib/user.ld",
+        "bin/nanvixd.exe",
+        "bin/kernel.elf",
+        "bin/mkramfs.exe",
+    )
+
     # ------------------------------------------------------------------
     # Docker hooks
     # ------------------------------------------------------------------
 
     def docker_image(self) -> str:  # noqa: D102
-        return "ghcr.io/nanvix/toolchain-gcc:sha-34a3641"
+        return "ghcr.io/nanvix/llvm-project:ca7933e47d3a"
 
     # ------------------------------------------------------------------
     # Helpers
@@ -107,6 +135,23 @@ class XzBuild(ZScript):
             )
         return Path(sysroot)
 
+    def _require_standalone(self) -> None:
+        """Fail unless the deployment mode is ``standalone``.
+
+        The xz port supports only the standalone deployment mode.  The
+        multi-process and single-process modes (which boot the guest under
+        ``linuxd``) are intentionally unsupported, so every lifecycle entry
+        point rejects them up front with an actionable message instead of
+        silently mis-handling the request.
+        """
+        mode = self.config.deployment_mode
+        if mode != "standalone":
+            log.fatal(
+                f"xz only supports the 'standalone' deployment mode (got {mode!r}).",
+                code=EXIT_BUILD_FAILURE,
+                hint="Set NANVIX_DEPLOYMENT_MODE=standalone (or --deployment-mode).",
+            )
+
     def _configure_env_overrides(self) -> dict[str, str]:
         """Return only the env keys we explicitly set for ./configure.
 
@@ -115,9 +160,11 @@ class XzBuild(ZScript):
         inputs without being polluted by ambient ``$PWD`` / ``$SHELL``
         / ``$TERM`` / etc.
 
-        Lifted from sqlite's Makefile.nanvix CONFIGURE_ENV block; LIBZ
-        dropped (xz has no zlib dependency), -DSQLITE_OMIT_WAL dropped,
-        -D_GNU_SOURCE added (zlib precedent for newlib feature gates).
+        The toolchain is the LLVM cross-compiler shipped in the
+        ``ghcr.io/nanvix/llvm-project`` image.  Every clang invocation is
+        pinned to the ``i686-unknown-nanvix`` target (:data:`_CLANG_TARGET`)
+        so the hosted Nanvix driver is always selected; the binutils
+        replacements are the ``llvm-*`` tools.
         """
         # translate_path() returns the host path unchanged when docker mode
         # is inactive, and the container mount-point (e.g. /mnt/sysroot)
@@ -132,30 +179,32 @@ class XzBuild(ZScript):
             else self._sysroot_path()
         )
         bin_ = f"{toolchain}/bin"
-        # Since Nanvix 0.16.19, process startup (_start) lives in
-        # libnvx_crt0.a (it drives __nanvix_libc_start_main in libposix.a)
-        # and must be linked first so its strong _start overrides the
-        # toolchain's weak no-op stub; otherwise the guest never reaches
-        # main and hangs.  Probe the host sysroot so this is a no-op on
-        # older Nanvix releases that do not ship the archive.
-        crt0_host = os.path.join(self._sysroot_path(), "lib", "libnvx_crt0.a")
-        crt0 = f"{sysroot}/lib/libnvx_crt0.a " if os.path.exists(crt0_host) else ""
+        # The clang driver for the i686-unknown-nanvix target links the
+        # toolchain's own crt0.o and newlib libc automatically (both ship in
+        # the LLVM image under /opt/nanvix) and supplies the C headers via its
+        # baked-in --sysroot (/opt/nanvix/usr/include), so no -I/-L/-l for
+        # the C runtime is needed here.  The only input the link still needs
+        # from the Nanvix sysroot is the user-space linker script: user.ld
+        # places the first PT_LOAD at BASE_ADDR (0x40000000), which nanvixd
+        # requires.  --allow-multiple-definition tolerates the startup
+        # symbols that the driver's crt0.o and libc.a both define.  Since
+        # Nanvix 0.18 the syscall backend is merged into libc.a, so the old
+        # -lposix / explicit libnvx_crt0.a link inputs are gone.
+        target = f"--target={_CLANG_TARGET}"
         return {
-            "AR": f"{bin_}/i686-nanvix-ar",
-            "AS": f"{bin_}/i686-nanvix-as",
-            "CC": f"{bin_}/i686-nanvix-gcc",
-            "CXX": f"{bin_}/i686-nanvix-g++",
-            "CPP": f"{bin_}/i686-nanvix-gcc -E",
-            "LD": f"{bin_}/i686-nanvix-ld",
-            "RANLIB": f"{bin_}/i686-nanvix-ranlib",
-            "STRIP": f"{bin_}/i686-nanvix-strip",
-            "NM": f"{bin_}/i686-nanvix-nm",
-            "CFLAGS": f"-O2 -D_GNU_SOURCE -I{sysroot}/include",
-            "CPPFLAGS": f"-D_GNU_SOURCE -I{sysroot}/include",
+            "AR": f"{bin_}/llvm-ar",
+            "AS": f"{bin_}/clang {target}",
+            "CC": f"{bin_}/clang {target}",
+            "CXX": f"{bin_}/clang++ {target}",
+            "CPP": f"{bin_}/clang {target} -E",
+            "LD": f"{bin_}/ld.lld",
+            "RANLIB": f"{bin_}/llvm-ranlib",
+            "STRIP": f"{bin_}/llvm-strip",
+            "NM": f"{bin_}/llvm-nm",
+            "CFLAGS": "-O2 -D_GNU_SOURCE",
+            "CPPFLAGS": "-D_GNU_SOURCE",
             "LDFLAGS": (
-                f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib "
-                f"-Wl,--allow-multiple-definition "
-                f"-Wl,--start-group {crt0}-lposix -lc -lm -Wl,--end-group"
+                f"-static -T{sysroot}/lib/user.ld -Wl,--allow-multiple-definition"
             ),
             # Intentionally empty: passing -Wl,--start-group via LIBS
             # breaks the sed pipeline that materialises liblzma.pc
@@ -246,6 +295,7 @@ class XzBuild(ZScript):
 
     def setup(self) -> bool:
         """Resolve sysroot/toolchain and prepare the autotools tree."""
+        self._require_standalone()
         result = super().setup()
         self._ensure_configure()
         return result
@@ -264,6 +314,7 @@ class XzBuild(ZScript):
         because ``make install DESTDIR=...`` and the test-ELF copy-back
         write through the bind-mounted workspace.
         """
+        self._require_standalone()
         repo = repo_root()
         opts = self._configure_opts()
         overrides = self._configure_env_overrides()
@@ -304,41 +355,21 @@ class XzBuild(ZScript):
         # `-all-static`, not a bare `-static`: libtool treats `-static` as
         # "prefer static *libtool* libraries" and never forwards it to the
         # compiler driver, so the link silently goes dynamic now that the
-        # 0.17.x sysroot ships a libc.so.  A dynamic executable gets an INTERP
+        # sysroot ships a libc.so.  A dynamic executable gets an INTERP
         # and a PHDR-bearing first PT_LOAD that the linker maps one page
         # *below* user.ld's BASE_ADDR (0x40000000); nanvixd then rejects it at
         # load time with "do_elf32_load() invalid load address".  `-all-static`
-        # makes libtool pass its link_static_flag (`-static`) through to gcc,
+        # makes libtool pass its link_static_flag (`-static`) through to clang,
         # producing a fully static ELF whose first LOAD sits exactly at
-        # BASE_ADDR.  Harmless pre-0.17 (no libc.so meant the link was already
-        # static).
-        tests_ldflags = f"-all-static -T{sysroot}/lib/user.ld -L{sysroot}/lib -Wl,--allow-multiple-definition"
-        # See _configure_env_overrides: link libnvx_crt0.a first (guarded so
-        # it is a no-op on Nanvix releases that predate the crt0 cutover).
-        crt0_host = os.path.join(self._sysroot_path(), "lib", "libnvx_crt0.a")
-        crt0 = f"{sysroot}/lib/libnvx_crt0.a," if os.path.exists(crt0_host) else ""
-        # Link the cross-toolchain's newlib libc/libm explicitly instead of a
-        # bare -lc/-lm.  Since Nanvix 0.17.x the release sysroot ships its own
-        # libc.a/libm.a (the Rust "nanvix_libc"), and because the link passes
-        # -L{sysroot}/lib first a plain -lc would bind there.  That libc
-        # dropped newlib's global reentrancy pointer `_impure_ptr`, while the
-        # upstream xz tests are compiled against the toolchain's newlib
-        # <stdio.h> (the sysroot ships no headers) where `stderr` expands to
-        # `_impure_ptr` -- so the test ELFs fail to link with
-        # "undefined reference to `_impure_ptr'".  Pinning libc.a/libm.a to the
-        # toolchain keeps the whole stdio stack on newlib (a self-consistent
-        # FILE model); newlib's stream cookies call POSIX write/read/lseek,
-        # which nanvix_libc/libposix still exports, so runtime I/O still works.
-        # Stopgap until nanvix/nanvix#2683 restores `_impure_ptr` (or the
-        # sysroot ships matching headers).  No-op on pre-0.17 sysroots that
-        # never shipped their own libc and where -lc already resolved here.
-        # $NEWLIB_LIBC/$NEWLIB_LIBM are resolved by the build script below; the
-        # `-print-file-name` probe must run WITHOUT -L{sysroot}/lib so it
-        # returns the toolchain newlib path, not the sysroot's libc.a.
-        cc = f"{TOOLCHAIN_CONTAINER_PATH}/bin/i686-nanvix-gcc"
-        tests_libs = (
-            f"-Wl,--start-group,{crt0}-lposix,$NEWLIB_LIBC,$NEWLIB_LIBM,--end-group"
+        # BASE_ADDR.
+        #
+        # As in _configure_env_overrides, the clang driver auto-links the LLVM
+        # image's own crt0.o and newlib libc, and user.ld is the only sysroot
+        # input the link needs, so tests carry no explicit -l link inputs.
+        tests_ldflags = (
+            f"-all-static -T{sysroot}/lib/user.ld -Wl,--allow-multiple-definition"
         )
+        tests_libs = ""
 
         configure_cmd = " ".join(["./configure", *(shlex.quote(o) for o in opts)])
         tests_targets = " ".join(_UPSTREAM_TEST_NAMES)
@@ -351,10 +382,6 @@ class XzBuild(ZScript):
                 configure_cmd,
                 f"make -j{nproc}",
                 f"make install DESTDIR={shlex.quote(str(stage_container))}",
-                # Resolve the toolchain's newlib libc/libm (see tests_libs).
-                # No -L flags here: -print-file-name must ignore the sysroot.
-                f"NEWLIB_LIBC=$({shlex.quote(cc)} -print-file-name=libc.a)",
-                f"NEWLIB_LIBM=$({shlex.quote(cc)} -print-file-name=libm.a)",
                 (
                     "make -C tests "
                     f"LDFLAGS={shlex.quote(tests_ldflags)} "
@@ -549,6 +576,7 @@ class XzBuild(ZScript):
                     "`test-functional` arguments from your invocation."
                 ),
             )
+        self._require_standalone()
         if IS_WINDOWS:
             self._run_tests_windows()
             return
@@ -559,9 +587,9 @@ class XzBuild(ZScript):
 
         Filters out names listed in :data:`_UPSTREAM_TEST_SKIPLIST`
         (logs one ``SKIP`` line per filtered entry) and runs the
-        remainder.  In standalone mode, uses ``make_initrd`` to bundle
-        each test binary with system daemons; in multi-process and
-        single-process modes, invokes nanvixd directly with the ELF.
+        remainder.  Uses ``make_initrd`` to bundle each test binary with
+        the system daemons for the standalone deployment mode (the only
+        mode this port supports).
         """
         log.info("=== xz functional tests ===")
         all_elfs = self._locate_upstream_tests()
@@ -572,10 +600,7 @@ class XzBuild(ZScript):
                 log.info(f"  SKIP: {elf.stem} ({reason})")
             else:
                 elfs.append(elf)
-        if self.config.deployment_mode == "standalone":
-            self._run_functional_standalone(elfs)
-        else:
-            self._run_functional_non_standalone(elfs)
+        self._run_functional_standalone(elfs)
         log.info("  PASS: xz functional tests")
 
     def _run_functional_standalone(self, elfs: list[Path]) -> None:
@@ -642,81 +667,14 @@ class XzBuild(ZScript):
                 code=EXIT_BUILD_FAILURE,
             )
 
-    def _run_functional_non_standalone(self, elfs: list[Path]) -> None:
-        """Run functional tests in multi-process or single-process mode.
-
-        Uses nanvixd.elf directly with a ramfs providing /tmp for any
-        test I/O.  No initrd is needed as daemons are managed by the
-        hypervisor in these modes.
-        """
-        sysroot = self._sysroot_path()
-        nanvixd = sysroot / "bin" / "nanvixd.elf"
-        mkramfs = sysroot / "bin" / "mkramfs.elf"
-        for tool in (nanvixd, mkramfs):
-            if not tool.is_file():
-                log.fatal(
-                    f"functional: {tool} not present",
-                    code=EXIT_MISSING_DEP,
-                    hint="Re-run `./z setup` to refresh the sysroot.",
-                )
-
-        failures: list[str] = []
-
-        for elf in elfs:
-            name = elf.stem
-            log.info(f"  Running {name}...")
-            try:
-                with tempfile.TemporaryDirectory(prefix=f"xz_test_{name}_") as tmp:
-                    tmp_path = Path(tmp)
-                    ramfs_dir = tmp_path / "ramfs"
-                    ramfs_dir.mkdir()
-                    (ramfs_dir / "tmp").mkdir()
-                    ramfs_img = tmp_path / "rootfs.img"
-
-                    run(
-                        str(mkramfs),
-                        "-o",
-                        str(ramfs_img),
-                        str(ramfs_dir),
-                        timeout=60,
-                    )
-
-                    run(
-                        str(nanvixd),
-                        "-bin-dir",
-                        str(sysroot / "bin"),
-                        "-ramfs",
-                        str(ramfs_img),
-                        "--",
-                        str(elf.resolve()),
-                        timeout=180,
-                    )
-                log.info(f"  PASS: {name}")
-            except SystemExit:
-                log.info(f"  FAIL: {name}")
-                failures.append(name)
-
-        if failures:
-            log.fatal(
-                "functional: FAIL: " + ", ".join(failures),
-                code=EXIT_BUILD_FAILURE,
-            )
-
     def _run_tests_windows(self) -> None:
         """Run upstream check_PROGRAMS natively on Windows via nanvixd.exe.
 
-        Only standalone mode is exercised on Windows; multi-process
-        and single-process require linuxd which is Linux-only.  Uses
-        make_initrd to bundle each test binary with system daemons,
-        and a ramfs providing /tmp for any test I/O.
+        Uses make_initrd to bundle each test binary with the system
+        daemons for the standalone deployment mode (the only mode this
+        port supports), and a ramfs providing /tmp for any test I/O.
+        The caller (:meth:`test`) has already enforced standalone mode.
         """
-        if self.config.deployment_mode != "standalone":
-            print(
-                f"Skipping tests on Windows for mode "
-                f"'{self.config.deployment_mode}' (requires linuxd)."
-            )
-            return
-
         sysroot = self.config.get(CFG_SYSROOT, "")
         if not sysroot:
             log.fatal(

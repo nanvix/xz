@@ -73,7 +73,7 @@ Override the pinned `nanvix-zutil` version with
 
 | Component | Description | Default Location |
 |-----------|-------------|------------------|
-| **Nanvix Toolchain** | i686-nanvix cross-compiler | `/opt/nanvix` (or `$NANVIX_TOOLCHAIN`) |
+| **Nanvix Toolchain** | `i686-unknown-nanvix` LLVM/clang cross-compiler (`ghcr.io/nanvix/llvm-project`) | `/opt/nanvix` (or `$NANVIX_TOOLCHAIN`) |
 | **Nanvix Sysroot** | System libraries and linker script | resolved by `./z setup` |
 | **Python 3** | Required to bootstrap `nanvix-zutil` | on `PATH` |
 
@@ -194,7 +194,7 @@ git commit -m "Refresh vendored autotools outputs"
 | **`--enable-small`** | Built with the size-optimised codepath; multi-threaded encoder (`lzma_stream_encoder_mt`) is excluded. |
 | **`--disable-threads`** | Single-threaded only (Nanvix consumers — primarily CPython — use single-threaded paths). |
 | **No NLS / docs / scripts** | `--disable-nls --disable-doc --disable-scripts`. |
-| **No `xz`/`xzdec`/`lzmadec`/`lzmainfo` CLIs** | `--disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo`. The downstream consumer (CPython `_lzma`) needs only `liblzma.a`; disabling the CLIs also avoids depending on `alarm`/`sigaction`/`sigprocmask` which Nanvix `libposix.a` does not yet implement. |
+| **No `xz`/`xzdec`/`lzmadec`/`lzmainfo` CLIs** | `--disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo`. The downstream consumer (CPython `_lzma`) needs only `liblzma.a`; disabling the CLIs also avoids depending on `alarm`/`sigaction`/`sigprocmask` which Nanvix `libc` (the POSIX backend, formerly `libposix.a`) does not yet implement. |
 
 ---
 
@@ -203,8 +203,9 @@ git commit -m "Refresh vendored autotools outputs"
 Workflow: [`.github/workflows/nanvix-ci.yml`](.github/workflows/nanvix-ci.yml).
 Calls the reusable workflow at
 `nanvix/workflows/.github/workflows/nanvix-ci.yml@v1.14.0` across the
-full 2 × 3 × 2 matrix from `.nanvix/nanvix.toml` (with `hyperlight`
-excluded from both the build and Windows-test matrices, matching the
+full 2 × 1 × 1 matrix from `.nanvix/nanvix.toml` (standalone is the only
+supported deployment mode and 256mb the only memory size; `hyperlight`
+is excluded from both the build and Windows-test matrices, matching the
 zero-dep convention established by `nanvix/zlib` and `nanvix/sqlite`).
 Daily cron at 09:00 UTC (tier1, alongside the other zero-dep ports).
 
@@ -226,5 +227,5 @@ Daily cron at 09:00 UTC (tier1, alongside the other zero-dep ports).
 - Investigate a CMake-driven build path as an alternative to the
   autotools route.
 - Re-enable the `xz` CLI (and revisit `xzdec`/`lzmadec`/`lzmainfo`)
-  once Nanvix `libposix` provides `alarm`, `sigaction`, and
-  `sigprocmask`.
+  once Nanvix `libc` (the POSIX backend) provides `alarm`, `sigaction`,
+  and `sigprocmask`.
