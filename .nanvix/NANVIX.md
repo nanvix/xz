@@ -203,7 +203,7 @@ git commit -m "Refresh vendored autotools outputs"
 Workflow: [`.github/workflows/nanvix-ci.yml`](.github/workflows/nanvix-ci.yml).
 Calls the reusable workflow at
 `nanvix/workflows/.github/workflows/nanvix-ci.yml@v1.14.0` across the
-full 2 × 3 × 2 matrix from `.nanvix/nanvix.toml` (with `hyperlight`
+full 2 × 1 × 2 matrix from `.nanvix/nanvix.toml` (with `hyperlight`
 excluded from both the build and Windows-test matrices, matching the
 zero-dep convention established by `nanvix/zlib` and `nanvix/sqlite`).
 Daily cron at 09:00 UTC (tier1, alongside the other zero-dep ports).

@@ -559,9 +559,8 @@ class XzBuild(ZScript):
 
         Filters out names listed in :data:`_UPSTREAM_TEST_SKIPLIST`
         (logs one ``SKIP`` line per filtered entry) and runs the
-        remainder.  In standalone mode, uses ``make_initrd`` to bundle
-        each test binary with system daemons; in multi-process and
-        single-process modes, invokes nanvixd directly with the ELF.
+        remainder.  Uses ``make_initrd`` to bundle each test binary
+        with system daemons.
         """
         log.info("=== xz functional tests ===")
         all_elfs = self._locate_upstream_tests()
@@ -572,10 +571,7 @@ class XzBuild(ZScript):
                 log.info(f"  SKIP: {elf.stem} ({reason})")
             else:
                 elfs.append(elf)
-        if self.config.deployment_mode == "standalone":
-            self._run_functional_standalone(elfs)
-        else:
-            self._run_functional_non_standalone(elfs)
+        self._run_functional_standalone(elfs)
         log.info("  PASS: xz functional tests")
 
     def _run_functional_standalone(self, elfs: list[Path]) -> None:
@@ -642,81 +638,12 @@ class XzBuild(ZScript):
                 code=EXIT_BUILD_FAILURE,
             )
 
-    def _run_functional_non_standalone(self, elfs: list[Path]) -> None:
-        """Run functional tests in multi-process or single-process mode.
-
-        Uses nanvixd.elf directly with a ramfs providing /tmp for any
-        test I/O.  No initrd is needed as daemons are managed by the
-        hypervisor in these modes.
-        """
-        sysroot = self._sysroot_path()
-        nanvixd = sysroot / "bin" / "nanvixd.elf"
-        mkramfs = sysroot / "bin" / "mkramfs.elf"
-        for tool in (nanvixd, mkramfs):
-            if not tool.is_file():
-                log.fatal(
-                    f"functional: {tool} not present",
-                    code=EXIT_MISSING_DEP,
-                    hint="Re-run `./z setup` to refresh the sysroot.",
-                )
-
-        failures: list[str] = []
-
-        for elf in elfs:
-            name = elf.stem
-            log.info(f"  Running {name}...")
-            try:
-                with tempfile.TemporaryDirectory(prefix=f"xz_test_{name}_") as tmp:
-                    tmp_path = Path(tmp)
-                    ramfs_dir = tmp_path / "ramfs"
-                    ramfs_dir.mkdir()
-                    (ramfs_dir / "tmp").mkdir()
-                    ramfs_img = tmp_path / "rootfs.img"
-
-                    run(
-                        str(mkramfs),
-                        "-o",
-                        str(ramfs_img),
-                        str(ramfs_dir),
-                        timeout=60,
-                    )
-
-                    run(
-                        str(nanvixd),
-                        "-bin-dir",
-                        str(sysroot / "bin"),
-                        "-ramfs",
-                        str(ramfs_img),
-                        "--",
-                        str(elf.resolve()),
-                        timeout=180,
-                    )
-                log.info(f"  PASS: {name}")
-            except SystemExit:
-                log.info(f"  FAIL: {name}")
-                failures.append(name)
-
-        if failures:
-            log.fatal(
-                "functional: FAIL: " + ", ".join(failures),
-                code=EXIT_BUILD_FAILURE,
-            )
-
     def _run_tests_windows(self) -> None:
         """Run upstream check_PROGRAMS natively on Windows via nanvixd.exe.
 
-        Only standalone mode is exercised on Windows; multi-process
-        and single-process require linuxd which is Linux-only.  Uses
-        make_initrd to bundle each test binary with system daemons,
+        Uses make_initrd to bundle each test binary with system daemons,
         and a ramfs providing /tmp for any test I/O.
         """
-        if self.config.deployment_mode != "standalone":
-            print(
-                f"Skipping tests on Windows for mode "
-                f"'{self.config.deployment_mode}' (requires linuxd)."
-            )
-            return
-
         sysroot = self.config.get(CFG_SYSROOT, "")
         if not sysroot:
             log.fatal(
