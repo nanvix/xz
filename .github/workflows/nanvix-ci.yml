@@ -30,12 +30,13 @@ jobs:
         with:
             platforms: '["microvm"]'
             process-modes: '["standalone"]'
-            memory-sizes: '["128mb","256mb"]'
+            memory-sizes: '["256mb"]'
             windows-matrix-exclude: '[]'
             skip-full-test-modes: '[]'
             caller-event-name: ${{ github.event_name }}
             windows-test: true
-            docker-image: "ghcr.io/nanvix/toolchain-gcc:sha-34a3641" # yamllint disable-line rule:line-length
+            docker-image: >-
+                ghcr.io/nanvix/nanvix-sdk-c-clang@sha256:f61737cb0780e6a2058c6d0bdf8ae5562db18de437173b2bcbbe6973abd3689f
         secrets:
             GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
             DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}
@@ -46,12 +47,13 @@ jobs:
         with:
             platforms: '["microvm"]'
             process-modes: '["standalone"]'
-            memory-sizes: '["128mb","256mb"]'
+            memory-sizes: '["256mb"]'
             windows-matrix-exclude: '[]'
             skip-full-test-modes: '[]'
             caller-event-name: 'schedule'
             windows-test: true
-            docker-image: "ghcr.io/nanvix/toolchain-gcc:sha-34a3641" # yamllint disable-line rule:line-length
+            docker-image: >-
+                ghcr.io/nanvix/nanvix-sdk-c-clang@sha256:f61737cb0780e6a2058c6d0bdf8ae5562db18de437173b2bcbbe6973abd3689f
         secrets:
             GH_TOKEN: ${{ secrets.GH_TOKEN || secrets.GITHUB_TOKEN }}
             DISPATCH_TOKEN: ${{ secrets.DISPATCH_TOKEN }}

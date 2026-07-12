@@ -4,9 +4,9 @@
 """Nanvix build script for XZ Utils.
 
 Usage:
-    ./z setup     # Resolve toolchain + download sysroot, prepare upstream tree
+    ./z setup     # Resolve the SDK + runtime sysroot, prepare upstream tree
     ./z build    # Cross-compile liblzma.a
-    ./z test     # Three-tier smoke + integration + functional ladder
+    ./z test     # Run upstream C tests under Nanvix
     ./z release  # Stage sysroot/{lib,include} + emit dist/*.tar.gz
     ./z clean    # Remove build artefacts
 """
@@ -77,24 +77,40 @@ _UPSTREAM_TEST_SKIPLIST: dict[str, str] = {}
 
 IS_WINDOWS = sys.platform == "win32"
 
+#: Docker image for cross-compiling Nanvix targets.
+NANVIX_DOCKER_IMAGE = (
+    "ghcr.io/nanvix/nanvix-sdk-c-clang"
+    "@sha256:f61737cb0780e6a2058c6d0bdf8ae5562db18de437173b2bcbbe6973abd3689f"
+)
+
 
 class XzBuild(ZScript):
     """Build script for nanvix/xz."""
+
+    # Build-time headers, libraries, startup objects, and linker scripts come
+    # from the SDK. The downloaded sysroot is used only to run tests.
+    SYSROOT_REQUIRED_FILES = (
+        "bin/nanvixd.elf",
+        "bin/kernel.elf",
+        "bin/mkramfs.elf",
+    )
+    SYSROOT_REQUIRED_FILES_WINDOWS = (
+        "bin/nanvixd.exe",
+        "bin/kernel.elf",
+        "bin/mkramfs.exe",
+    )
 
     # ------------------------------------------------------------------
     # Docker hooks
     # ------------------------------------------------------------------
 
-    def docker_image(self) -> str:  # noqa: D102
-        return "ghcr.io/nanvix/toolchain-gcc:sha-34a3641"
+    def docker_image(self) -> str:
+        """Return the default Docker image for cross-compilation."""
+        return NANVIX_DOCKER_IMAGE
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
-
-    def _toolchain_path(self) -> Path:
-        """Return the resolved cross-toolchain prefix."""
-        return Path(str(TOOLCHAIN_CONTAINER_PATH))
 
     def _sysroot_path(self) -> Path:
         """Return the resolved Nanvix sysroot, or fail loudly."""
@@ -115,60 +131,28 @@ class XzBuild(ZScript):
         inputs without being polluted by ambient ``$PWD`` / ``$SHELL``
         / ``$TERM`` / etc.
 
-        Lifted from sqlite's Makefile.nanvix CONFIGURE_ENV block; LIBZ
-        dropped (xz has no zlib dependency), -DSQLITE_OMIT_WAL dropped,
-        -D_GNU_SOURCE added (zlib precedent for newlib feature gates).
+        Build-time headers, libraries, startup objects, and linker scripts
+        come from the SDK, so the downloaded sysroot is intentionally absent
+        from these values.
         """
-        # translate_path() returns the host path unchanged when docker mode
-        # is inactive, and the container mount-point (e.g. /mnt/sysroot)
-        # when --with-docker is in effect.  Without this remap, configure's
-        # C compiler probe fails inside the container with "cannot create
-        # executables" because it is told to link against host paths that
-        # do not exist in the container's filesystem.
         toolchain = str(TOOLCHAIN_CONTAINER_PATH)
-        sysroot = (
-            self.docker.translate_path(self._sysroot_path())
-            if self.docker
-            else self._sysroot_path()
-        )
         bin_ = f"{toolchain}/bin"
-        # Since Nanvix 0.16.19, process startup (_start) lives in
-        # libnvx_crt0.a (it drives __nanvix_libc_start_main in libposix.a)
-        # and must be linked first so its strong _start overrides the
-        # toolchain's weak no-op stub; otherwise the guest never reaches
-        # main and hangs.  Probe the host sysroot so this is a no-op on
-        # older Nanvix releases that do not ship the archive.
-        crt0_host = os.path.join(self._sysroot_path(), "lib", "libnvx_crt0.a")
-        crt0 = f"{sysroot}/lib/libnvx_crt0.a " if os.path.exists(crt0_host) else ""
         return {
-            "AR": f"{bin_}/i686-nanvix-ar",
-            "AS": f"{bin_}/i686-nanvix-as",
-            "CC": f"{bin_}/i686-nanvix-gcc",
-            "CXX": f"{bin_}/i686-nanvix-g++",
-            "CPP": f"{bin_}/i686-nanvix-gcc -E",
-            "LD": f"{bin_}/i686-nanvix-ld",
-            "RANLIB": f"{bin_}/i686-nanvix-ranlib",
-            "STRIP": f"{bin_}/i686-nanvix-strip",
-            "NM": f"{bin_}/i686-nanvix-nm",
-            "CFLAGS": f"-O2 -D_GNU_SOURCE -I{sysroot}/include",
-            "CPPFLAGS": f"-D_GNU_SOURCE -I{sysroot}/include",
-            "LDFLAGS": (
-                f"-static -T{sysroot}/lib/user.ld -L{sysroot}/lib "
-                f"-Wl,--allow-multiple-definition "
-                f"-Wl,--start-group {crt0}-lposix -lc -lm -Wl,--end-group"
-            ),
-            # Intentionally empty: passing -Wl,--start-group via LIBS
-            # breaks the sed pipeline that materialises liblzma.pc
-            # (the commas inside -Wl,... collide with sed's `s,,,g`
-            # delimiter).  All link inputs are carried in LDFLAGS.
+            "AR": f"{bin_}/llvm-ar",
+            "AS": f"{bin_}/clang",
+            "CC": f"{bin_}/clang",
+            "CXX": f"{bin_}/clang++",
+            "CPP": f"{bin_}/clang-cpp",
+            "LD": f"{bin_}/ld.lld",
+            "RANLIB": f"{bin_}/llvm-ranlib",
+            "STRIP": f"{bin_}/llvm-strip",
+            "NM": f"{bin_}/llvm-nm",
+            "OBJDUMP": f"{bin_}/llvm-objdump",
+            "CFLAGS": "-O2 -D_GNU_SOURCE",
+            "CPPFLAGS": "-D_GNU_SOURCE",
+            "LDFLAGS": "-Wl,-z,noexecstack",
             "LIBS": "",
         }
-
-    def _configure_env(self) -> dict[str, str]:
-        """Full env for ./configure: ``os.environ`` merged with overrides."""
-        env: dict[str, str] = dict(os.environ)
-        env.update(self._configure_env_overrides())
-        return env
 
     def _configured_marker_contents(
         self,
@@ -177,12 +161,9 @@ class XzBuild(ZScript):
     ) -> str:
         """Deterministic fingerprint of the configure inputs.
 
-        Stored in ``.nanvix-configured`` so ``build()`` can detect when
-        a re-``./z setup`` (or a manual ``nanvix.toml`` edit) has
-        resolved a different sysroot or toolchain and force a clean
-        re-``./configure`` instead of silently reusing the prior
-        ``Makefile``.  Plain key=value text rather than a hash so a
-        human can ``cat`` the marker and see what it pinned.
+        Stored in ``.nanvix-configured`` after a successful build. Plain
+        key=value text rather than a hash lets a human ``cat`` the marker
+        and see what it pinned.
         """
         lines = [
             "# configured by .nanvix/z.py — do not edit; regenerated by build()",
@@ -245,7 +226,7 @@ class XzBuild(ZScript):
     # ------------------------------------------------------------------
 
     def setup(self) -> bool:
-        """Resolve sysroot/toolchain and prepare the autotools tree."""
+        """Resolve the SDK/runtime sysroot and prepare the autotools tree."""
         result = super().setup()
         self._ensure_configure()
         return result
@@ -293,53 +274,6 @@ class XzBuild(ZScript):
             else tests_dest_host
         )
 
-        # See _build_upstream_tests' historical comment block: drop the
-        # link group from LDFLAGS at make-time for the tests target and
-        # carry it via LIBS so libtool preserves positional ordering.
-        sysroot = (
-            self.docker.translate_path(self._sysroot_path())
-            if self.docker
-            else self._sysroot_path()
-        )
-        # `-all-static`, not a bare `-static`: libtool treats `-static` as
-        # "prefer static *libtool* libraries" and never forwards it to the
-        # compiler driver, so the link silently goes dynamic now that the
-        # 0.17.x sysroot ships a libc.so.  A dynamic executable gets an INTERP
-        # and a PHDR-bearing first PT_LOAD that the linker maps one page
-        # *below* user.ld's BASE_ADDR (0x40000000); nanvixd then rejects it at
-        # load time with "do_elf32_load() invalid load address".  `-all-static`
-        # makes libtool pass its link_static_flag (`-static`) through to gcc,
-        # producing a fully static ELF whose first LOAD sits exactly at
-        # BASE_ADDR.  Harmless pre-0.17 (no libc.so meant the link was already
-        # static).
-        tests_ldflags = f"-all-static -T{sysroot}/lib/user.ld -L{sysroot}/lib -Wl,--allow-multiple-definition"
-        # See _configure_env_overrides: link libnvx_crt0.a first (guarded so
-        # it is a no-op on Nanvix releases that predate the crt0 cutover).
-        crt0_host = os.path.join(self._sysroot_path(), "lib", "libnvx_crt0.a")
-        crt0 = f"{sysroot}/lib/libnvx_crt0.a," if os.path.exists(crt0_host) else ""
-        # Link the cross-toolchain's newlib libc/libm explicitly instead of a
-        # bare -lc/-lm.  Since Nanvix 0.17.x the release sysroot ships its own
-        # libc.a/libm.a (the Rust "nanvix_libc"), and because the link passes
-        # -L{sysroot}/lib first a plain -lc would bind there.  That libc
-        # dropped newlib's global reentrancy pointer `_impure_ptr`, while the
-        # upstream xz tests are compiled against the toolchain's newlib
-        # <stdio.h> (the sysroot ships no headers) where `stderr` expands to
-        # `_impure_ptr` -- so the test ELFs fail to link with
-        # "undefined reference to `_impure_ptr'".  Pinning libc.a/libm.a to the
-        # toolchain keeps the whole stdio stack on newlib (a self-consistent
-        # FILE model); newlib's stream cookies call POSIX write/read/lseek,
-        # which nanvix_libc/libposix still exports, so runtime I/O still works.
-        # Stopgap until nanvix/nanvix#2683 restores `_impure_ptr` (or the
-        # sysroot ships matching headers).  No-op on pre-0.17 sysroots that
-        # never shipped their own libc and where -lc already resolved here.
-        # $NEWLIB_LIBC/$NEWLIB_LIBM are resolved by the build script below; the
-        # `-print-file-name` probe must run WITHOUT -L{sysroot}/lib so it
-        # returns the toolchain newlib path, not the sysroot's libc.a.
-        cc = f"{TOOLCHAIN_CONTAINER_PATH}/bin/i686-nanvix-gcc"
-        tests_libs = (
-            f"-Wl,--start-group,{crt0}-lposix,$NEWLIB_LIBC,$NEWLIB_LIBM,--end-group"
-        )
-
         configure_cmd = " ".join(["./configure", *(shlex.quote(o) for o in opts)])
         tests_targets = " ".join(_UPSTREAM_TEST_NAMES)
 
@@ -351,16 +285,7 @@ class XzBuild(ZScript):
                 configure_cmd,
                 f"make -j{nproc}",
                 f"make install DESTDIR={shlex.quote(str(stage_container))}",
-                # Resolve the toolchain's newlib libc/libm (see tests_libs).
-                # No -L flags here: -print-file-name must ignore the sysroot.
-                f"NEWLIB_LIBC=$({shlex.quote(cc)} -print-file-name=libc.a)",
-                f"NEWLIB_LIBM=$({shlex.quote(cc)} -print-file-name=libm.a)",
-                (
-                    "make -C tests "
-                    f"LDFLAGS={shlex.quote(tests_ldflags)} "
-                    f'LIBS="{tests_libs}" '
-                    f"{tests_targets} -j{nproc}"
-                ),
+                f"make -C tests {tests_targets} -j{nproc}",
                 f"mkdir -p {shlex.quote(str(tests_dest_container))}",
                 # libtool drops the unwrapped ELF under tests/.libs/<name>;
                 # in the rare case it inlines the binary directly into
