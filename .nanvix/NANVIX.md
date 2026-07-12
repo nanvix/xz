@@ -14,7 +14,7 @@ upstream-repo: tukaani-project/xz
 upstream-version: 5.2.5
 target-os: nanvix
 target-arch: i686
-nanvix-version: 0.12.485
+nanvix-version: 0.20.0
 build-system: autoconf (Python-driven via .nanvix/z.py)
 output-type: static-library
 license: GPLv2 / GPLv3 / LGPLv2.1 (per upstream COPYING.*)
@@ -35,6 +35,7 @@ Nanvix. The build is driven by `.nanvix/z.py` (a `nanvix-zutil`
 | **Base Version** | XZ Utils 5.2.5 |
 | **Target Platform** | Nanvix (i686) |
 | **Build System** | autoconf (Python-driven via `.nanvix/z.py`) |
+| **SDK** | `nanvix-sdk-c-clang` v0.20.0-sdk.1 |
 | **Outputs** | `liblzma.a`, `liblzma.pc`, `lzma.h`, `lzma/*.h` |
 | **Dependencies** | none |
 
@@ -57,9 +58,9 @@ Nanvix. The build is driven by `.nanvix/z.py` (a `nanvix-zutil`
 ```bash
 # The ./z wrapper auto-bootstraps nanvix-zutil into .nanvix/venv/ on first run.
 # Requires: python3
-./z setup     # Resolve toolchain + sysroot, prepare upstream tree
+./z setup     # Resolve the SDK + runtime sysroot, prepare upstream tree
 ./z build     # Cross-compile liblzma.a
-./z test      # Smoke + integration + functional tiers
+./z test      # Run upstream C tests under Nanvix
 ./z release   # Package release tarball under dist/
 ./z clean     # Remove build artefacts
 ```
@@ -73,11 +74,17 @@ Override the pinned `nanvix-zutil` version with
 
 | Component | Description | Default Location |
 |-----------|-------------|------------------|
-| **Nanvix Toolchain** | i686-nanvix cross-compiler | `/opt/nanvix` (or `$NANVIX_TOOLCHAIN`) |
-| **Nanvix Sysroot** | System libraries and linker script | resolved by `./z setup` |
+| **Nanvix C SDK** | Clang/LLVM compiler, headers, libraries, and linker script | `/opt/nanvix` (or `$NANVIX_TOOLCHAIN`) |
+| **Nanvix Runtime Sysroot** | Runtime binaries used by tests | resolved by `./z setup` |
 | **Python 3** | Required to bootstrap `nanvix-zutil` | on `PATH` |
 
 XZ has no third-party dependencies.
+
+The build uses Clang, `clang-cpp`, `ld.lld`, and the LLVM binutils from
+`ghcr.io/nanvix/nanvix-sdk-c-clang@sha256:f61737cb0780e6a2058c6d0bdf8ae5562db18de437173b2bcbbe6973abd3689f`.
+Executable links go through the Clang driver, which supplies the SDK's
+startup object, libc, compiler runtime, and linker script. Downloaded
+Nanvix artifacts are runtime-only.
 
 ---
 
@@ -101,26 +108,20 @@ Produces under `build/`:
 
 ## Testing
 
-Tests run in three tiers (mirrors the sibling ports):
-
-1. **Smoke** — verify build artefacts exist and meet minimum sizes.
-2. **Integration** — cross-compile upstream `tests/check_PROGRAMS`
-   via `make -C tests <test_*>`; assert each
-   `build/tests/test_*.elf` exists and is a static ELF.
-3. **Functional** — run each `build/tests/test_*.elf` under
-   `nanvixd.elf`; PASS iff every test exits 0 (or 77, automake's
-   SKIP convention) and the SKIP set is a subset of the documented
-   skip-list below.
+`./z build` cross-compiles the upstream `tests/check_PROGRAMS` with the
+SDK Clang driver. `./z test` runs every resulting
+`build/tests/test_*.elf` under `nanvixd.elf`; PASS requires every enabled
+test to exit successfully. Shell-driven upstream tests remain disabled
+because the runtime test image does not provide a POSIX shell.
 
 All six upstream C tests (`test_check`, `test_stream_flags`,
 `test_filter_flags`, `test_block_header`, `test_index`,
-`test_bcj_exact_size`) pass under `nanvixd.elf` as of 2026-05-04;
+`test_bcj_exact_size`) pass under `nanvixd.elf` as of 2026-07-12;
 the skip-list (`_UPSTREAM_TEST_SKIPLIST` in `.nanvix/z.py`) is
 therefore empty.
 
 ```bash
-./z test                       # all three tiers
-./z test -- test-smoke         # single tier
+./z test
 ```
 
 ---
@@ -194,7 +195,8 @@ git commit -m "Refresh vendored autotools outputs"
 | **`--enable-small`** | Built with the size-optimised codepath; multi-threaded encoder (`lzma_stream_encoder_mt`) is excluded. |
 | **`--disable-threads`** | Single-threaded only (Nanvix consumers — primarily CPython — use single-threaded paths). |
 | **No NLS / docs / scripts** | `--disable-nls --disable-doc --disable-scripts`. |
-| **No `xz`/`xzdec`/`lzmadec`/`lzmainfo` CLIs** | `--disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo`. The downstream consumer (CPython `_lzma`) needs only `liblzma.a`; disabling the CLIs also avoids depending on `alarm`/`sigaction`/`sigprocmask` which Nanvix `libposix.a` does not yet implement. |
+| **No `xz`/`xzdec`/`lzmadec`/`lzmainfo` CLIs** | `--disable-xz --disable-xzdec --disable-lzmadec --disable-lzmainfo`. The downstream consumer (CPython `_lzma`) needs only `liblzma.a`; the CLI runtime surface remains outside this port's supported scope. |
+| **MicroVM 256 MiB runtime only** | Nanvix v0.20.0 publishes runtime assets only for MicroVM at 256 MiB; there are no Hyperlight or MicroVM 128 MiB artifacts. The supported SDK build/test matrix therefore uses `microvm` × `standalone` × `256mb` only; missing assets outside that matrix are not XZ port failures. |
 
 ---
 
@@ -202,10 +204,9 @@ git commit -m "Refresh vendored autotools outputs"
 
 Workflow: [`.github/workflows/nanvix-ci.yml`](.github/workflows/nanvix-ci.yml).
 Calls the reusable workflow at
-`nanvix/workflows/.github/workflows/nanvix-ci.yml@v1.14.0` across the
-full 2 × 1 × 2 matrix from `.nanvix/nanvix.toml` (with `hyperlight`
-excluded from both the build and Windows-test matrices, matching the
-zero-dep convention established by `nanvix/zlib` and `nanvix/sqlite`).
+`nanvix/workflows/.github/workflows/nanvix-ci.yml@v2.5.0` across the
+`microvm` × `standalone` × `256mb` PR matrix, including all Linux and
+Windows test types.
 Daily cron at 09:00 UTC (tier1, alongside the other zero-dep ports).
 
 ### Future work
@@ -226,5 +227,4 @@ Daily cron at 09:00 UTC (tier1, alongside the other zero-dep ports).
 - Investigate a CMake-driven build path as an alternative to the
   autotools route.
 - Re-enable the `xz` CLI (and revisit `xzdec`/`lzmadec`/`lzmainfo`)
-  once Nanvix `libposix` provides `alarm`, `sigaction`, and
-  `sigprocmask`.
+  after its full runtime surface is validated on Nanvix.
