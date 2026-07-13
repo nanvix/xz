@@ -35,7 +35,7 @@ Nanvix. The build is driven by `.nanvix/z.py` (a `nanvix-zutil`
 | **Base Version** | XZ Utils 5.2.5 |
 | **Target Platform** | Nanvix (i686) |
 | **Build System** | autoconf (Python-driven via `.nanvix/z.py`) |
-| **SDK** | `nanvix-sdk-c-clang` v0.20.0-sdk.1 |
+| **SDK** | Canonical pin in `.nanvix/nanvix.toml` |
 | **Outputs** | `liblzma.a`, `liblzma.pc`, `lzma.h`, `lzma/*.h` |
 | **Dependencies** | none |
 
@@ -80,8 +80,8 @@ Override the pinned `nanvix-zutil` version with
 
 XZ has no third-party dependencies.
 
-The build uses Clang, `clang-cpp`, `ld.lld`, and the LLVM binutils from
-`ghcr.io/nanvix/nanvix-sdk-c-clang@sha256:f61737cb0780e6a2058c6d0bdf8ae5562db18de437173b2bcbbe6973abd3689f`.
+The build uses Clang, `clang-cpp`, `ld.lld`, and the LLVM binutils from the
+immutable SDK reference in `.nanvix/nanvix.toml`.
 Executable links go through the Clang driver, which supplies the SDK's
 startup object, libc, compiler runtime, and linker script. Downloaded
 Nanvix artifacts are runtime-only.
