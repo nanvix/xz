@@ -32,8 +32,7 @@ from nanvix_zutil import (
     run,
 )
 from nanvix_zutil.paths import (
-    include_out,
-    lib_out,
+    dev_out,
     repo_root,
     test_out,
 )
@@ -372,7 +371,7 @@ class XzBuild(ZScript):
         self._stage_release_outputs()
 
     def _stage_release_outputs(self) -> None:
-        """Mirror build/{lib,include} into lib_out()/include_out() and
+        """Mirror build/{lib,include} into dev_out()/{lib,include} and
         build/tests/*.elf into test_out() for the inherited release().
         """
         build_dir = repo_root() / "build"
@@ -380,8 +379,8 @@ class XzBuild(ZScript):
         include_dir = build_dir / "include"
         tests_dir = build_dir / "tests"
 
-        lib_o = lib_out()
-        inc_o = include_out()
+        lib_o = dev_out() / "lib"
+        inc_o = dev_out() / "include"
         tst_o = test_out()
         (lib_o / "pkgconfig").mkdir(parents=True, exist_ok=True)
         (inc_o / "lzma").mkdir(parents=True, exist_ok=True)
