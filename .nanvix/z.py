@@ -508,7 +508,7 @@ class XzBuild(ZScript):
             log.info(f"  Running {name}...")
             initrd: Path | None = None
             try:
-                initrd = make_initrd(self, elf, test_out())
+                initrd = make_initrd(elf, test_out())
                 with tempfile.TemporaryDirectory(prefix=f"xz_test_{name}_") as tmp:
                     tmp_path = Path(tmp)
                     ramfs_dir = tmp_path / "ramfs"
@@ -621,7 +621,7 @@ class XzBuild(ZScript):
             print(f"RUN  {name}...")
             initrd: Path | None = None
             try:
-                initrd = make_initrd(self, binary, test_out())
+                initrd = make_initrd(binary, test_out())
                 with tempfile.TemporaryDirectory(
                     prefix=f"nanvix_{name}_",
                     ignore_cleanup_errors=True,
