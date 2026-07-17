@@ -12,6 +12,6 @@ memory = ["256mb"]
 [toolchain]
 kind = "nanvix-sdk"
 provider = "c-clang"
-sdk-version = "v0.21.4-sdk.1"
+sdk-version = "v0.21.4-sdk.2"
 sdk-image = "ghcr.io/nanvix/nanvix-sdk-c-clang"
-sdk-digest = "sha256:c435a24b1f59cf1c8844663853fe05cb085714a5b643f21f2b02e4d0788eb502"
+sdk-digest = "sha256:75187fc953e6a95e8bc2ba654a6ff5404ebc85a8441fc15cf40afa9de563ce24"
