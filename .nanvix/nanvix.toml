@@ -1,7 +1,7 @@
 [package]
 name = "xz"
 version = "5.2.5"
-nanvix-version = "0.21.43"
+nanvix-version = "0.21.48"
 
 [builds]
 [builds.matrix]
@@ -12,6 +12,6 @@ memory = ["256mb"]
 [toolchain]
 kind = "nanvix-sdk"
 provider = "c-clang"
-sdk-version = "v0.21.43-sdk.1"
+sdk-version = "v0.21.48-sdk.1"
 sdk-image = "ghcr.io/nanvix/nanvix-sdk-c-clang"
-sdk-digest = "sha256:e922d9bb183c66e6e455915ed54024d00f96a61e06b8a844bff621aba0965a65"
+sdk-digest = "sha256:a17f75cb21e6b97e5a9d8ac72e695053024cfebb87a4c43460a3c1ed865a9cac"
