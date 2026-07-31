@@ -26,6 +26,7 @@ from nanvix_zutil import (
     EXIT_BUILD_FAILURE,
     EXIT_MISSING_DEP,
     TOOLCHAIN_CONTAINER_PATH,
+    DockerConfig,
     ZScript,
     log,
     make_initrd,
@@ -217,7 +218,7 @@ class XzBuild(ZScript):
         self._ensure_configure()
         return result
 
-    def build(self) -> None:
+    def build(self, docker: DockerConfig) -> None:
         """Cross-compile liblzma.a via the upstream autotools.
 
         Runs the entire autotools sequence (./configure -> make -> make
@@ -248,17 +249,15 @@ class XzBuild(ZScript):
             shutil.rmtree(stage_host)
         stage_host.mkdir(parents=True)
         stage_container = (
-            translate_path(self.docker.mounts, stage_host)
-            if self.docker
-            else stage_host
+            translate_path(docker.mounts, stage_host) if docker else stage_host
         )
 
         # Test-ELF destination directory, likewise translated.
         tests_dest_host = repo / "build" / "tests"
         tests_dest_host.mkdir(parents=True, exist_ok=True)
         tests_dest_container = (
-            translate_path(self.docker.mounts, tests_dest_host)
-            if self.docker
+            translate_path(docker.mounts, tests_dest_host)
+            if docker
             else tests_dest_host
         )
 
@@ -299,7 +298,7 @@ class XzBuild(ZScript):
             script,
             cwd=repo,
             env=env,
-            docker=self.docker,
+            docker=docker,
         )
 
         # Refresh the marker now that configure/make/install all
