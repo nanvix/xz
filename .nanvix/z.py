@@ -30,6 +30,7 @@ from nanvix_zutil import (
     log,
     make_initrd,
     run,
+    translate_path,
 )
 from nanvix_zutil.paths import (
     dev_out,
@@ -247,14 +248,16 @@ class XzBuild(ZScript):
             shutil.rmtree(stage_host)
         stage_host.mkdir(parents=True)
         stage_container = (
-            self.docker.translate_path(stage_host) if self.docker else stage_host
+            translate_path(self.docker.mounts, stage_host)
+            if self.docker
+            else stage_host
         )
 
         # Test-ELF destination directory, likewise translated.
         tests_dest_host = repo / "build" / "tests"
         tests_dest_host.mkdir(parents=True, exist_ok=True)
         tests_dest_container = (
-            self.docker.translate_path(tests_dest_host)
+            translate_path(self.docker.mounts, tests_dest_host)
             if self.docker
             else tests_dest_host
         )
