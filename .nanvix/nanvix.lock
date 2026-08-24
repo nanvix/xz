@@ -2,7 +2,7 @@
 
 [metadata]
 manifest-hash = "sha256:2fffc6b977ac71f79e8a0cf845c9551c2b977846a6ea8381948c45c2bb763fca"
-nanvix-zutil-version = "0.16.3"
+nanvix-zutil-version = "0.15.0"
 
 [metadata.sdk]
 schema-version = 1
